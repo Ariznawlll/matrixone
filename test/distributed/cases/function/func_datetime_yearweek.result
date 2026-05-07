@@ -63,7 +63,7 @@ null_result
 null
 SELECT YEARWEEK('1987-01-01', NULL) AS null_mode;
 null_mode
-198652
+null
 SELECT YEARWEEK('1987-01-01') AS yearweek_result,
 YEAR('1987-01-01') AS year_result,
 WEEK('1987-01-01', 0) AS week_result;
