@@ -1,96 +1,26 @@
-name: MatrixOne ALL CI
+name: Tenant Parallel BVT Trial
 
 on:
   pull_request_target:
-    types: [ opened, synchronize, reopened ]
-    branches: [ main,'[0-9]+.[0-9]+*' ]
+    types: [opened, synchronize, reopened]
+    branches: [main]
 
-concurrency: 
-  group: ${{ github.event.pull_request.head.repo.full_name}}/${{ github.event.pull_request.head.ref }}/${{ github.workflow }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
-  check-pr-valid:
-    runs-on: ubuntu-latest
-    name: CHECK PR VALID
-    outputs:
-      pr_valid: ${{ steps.check_pr_valid.outputs.pull_valid }}
-    steps:
-      - uses: matrixorigin/CI/actions/pulls-content-check@main
-        id: check_pr_valid
-        with:
-          github_token: ${{ secrets.TOKEN_ACTION }}
-          title_for_find_issue: "Which issue(s) this PR fixes:"
-          title_for_find_content: "What this PR does / why we need it:"
+  compose-tenant-bvt:
+    uses: matrixorigin/CI/.github/workflows/e2e-compose-parallel.yaml@codex/tenant-parallel-bvt
+    with:
+      tenant_parallel_enabled: true
+      ci_ref: codex/tenant-parallel-bvt
+    secrets:
+      TOKEN_ACTION: ${{ github.token }}
 
-  # ============ 非 3.0-dev 分支使用 @main ============
-  matrixone-ci:
-    name: Matrixone CI
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref != '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/ci.yaml@main
-    secrets: inherit
-
-  matrixone-upgrade-ci:
-    name: Matrixone Upgrade CI
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref != '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/e2e-upgrade.yaml@main
-    secrets: inherit
-
-  matrixone-compose-ci:
-    name: Matrixone Compose CI
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref != '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/e2e-compose.yaml@main
-    secrets: inherit
-
-  matrixone-standalone-ci:
-    name: Matrixone Standlone CI
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref != '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/e2e-standalone.yaml@main
-    secrets: inherit
-
-  matrixone-utils-ci:
-    name: Matrixone Utils CI
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref != '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/utils.yaml@main
-    secrets: inherit
-
-  # ============ 3.0-dev 分支使用 @release/3.0-dev ============
-  matrixone-ci-30:
-    name: Matrixone CI (3.0)
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref == '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/ci.yaml@release/3.0-dev
-    secrets: inherit
-
-  matrixone-upgrade-ci-30:
-    name: Matrixone Upgrade CI (3.0)
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref == '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/e2e-upgrade.yaml@release/3.0-dev
-    secrets: inherit
-
-  matrixone-compose-ci-30:
-    name: Matrixone Compose CI (3.0)
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref == '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/e2e-compose.yaml@release/3.0-dev
-    secrets: inherit
-
-  matrixone-standalone-ci-30:
-    name: Matrixone Standlone CI (3.0)
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref == '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/e2e-standalone.yaml@release/3.0-dev
-    secrets: inherit
-
-  matrixone-utils-ci-30:
-    name: Matrixone Utils CI (3.0)
-    needs: check-pr-valid
-    if: ${{ needs.check-pr-valid.outputs.pr_valid == 'true' && github.base_ref == '3.0-dev' }}
-    uses: matrixorigin/CI/.github/workflows/utils.yaml@release/3.0-dev
-    secrets: inherit
+  standalone-tenant-bvt:
+    uses: matrixorigin/CI/.github/workflows/e2e-standalone-parallel.yaml@codex/tenant-parallel-bvt
+    with:
+      tenant_parallel_enabled: true
+      ci_ref: codex/tenant-parallel-bvt
+    secrets:
+      TOKEN_ACTION: ${{ github.token }}
