@@ -57,6 +57,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/lockop"
 	"github.com/matrixorigin/matrixone/pkg/sql/features"
 	sqliceberg "github.com/matrixorigin/matrixone/pkg/sql/iceberg"
+	sqlmongodb "github.com/matrixorigin/matrixone/pkg/sql/mongodb"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
@@ -285,7 +286,7 @@ func (s *Scope) DropDatabase(c *Compile) error {
 			catalog.MO_PITR_CHANGED_TIME, now,
 
 			catalog.MO_PITR_ACCOUNT_ID, accountId,
-			catalog.MO_PITR_DB_NAME, dbName,
+			catalog.MO_PITR_DB_NAME, sqlquote.EscapeString(dbName),
 			catalog.MO_PITR_STATUS, 1,
 			catalog.MO_PITR_OBJECT_ID, database.GetDatabaseId(c.proc.Ctx),
 		)
@@ -1771,6 +1772,9 @@ func (s *Scope) CreateTable(c *Compile) error {
 		)
 		return err
 	}
+	if err := c.maybeInsertMongoDBTableMapping(dbSource, main, qry); err != nil {
+		return err
+	}
 
 	var indexExtra *api.SchemaExtra
 	for i, def := range qry.IndexTables {
@@ -2154,6 +2158,92 @@ func icebergCreateSQLFromPlanTableDef(tableDef *plan.TableDef) string {
 		}
 	}
 	return ""
+}
+
+func (c *Compile) maybeInsertMongoDBTableMapping(dbSource engine.Database, rel engine.Relation, qry *plan.CreateTable) error {
+	createSQL := icebergCreateSQLFromPlanTableDef(qry.GetTableDef())
+	env, found, err := sqlmongodb.ParseCreateSQLEnvelope(c.proc.Ctx, createSQL)
+	if err != nil || !found {
+		return err
+	}
+	accountID, err := defines.GetAccountId(c.proc.Ctx)
+	if err != nil {
+		return err
+	}
+	dbIDText := dbSource.GetDatabaseId(c.proc.Ctx)
+	dbID, err := strconv.ParseUint(dbIDText, 10, 64)
+	if err != nil || dbID == 0 {
+		return moerr.NewInternalErrorf(c.proc.Ctx, "invalid database id for MongoDB mapping: %s", dbIDText)
+	}
+	connectionID, err := c.lookupMongoDBConnectionID(accountID, env.Connection)
+	if err != nil {
+		return err
+	}
+	mapping := sqlmongodb.TableMapping{
+		AccountID: accountID, DatabaseID: dbID, TableID: rel.GetTableID(c.proc.Ctx),
+		ConnectionID: connectionID, Connection: env.Connection,
+		Database: env.Database, Collection: env.Collection,
+		SchemaMode: env.SchemaMode, Conversion: env.ConversionMode,
+		SplitKey: env.SplitKey, MaxParallelism: env.MaxParallelism,
+		Columns: env.Columns, Version: 1,
+	}
+	return c.runSqlWithOptions(
+		sqlmongodb.InsertTableMappingSQL(mapping),
+		executor.StatementOption{}.WithDisableLog(),
+	)
+}
+
+func (c *Compile) lookupMongoDBConnectionID(accountID uint32, name string) (uint64, error) {
+	res, err := c.runSqlWithResultAndOptions(
+		sqlmongodb.GetConnectionByNameForUpdateSQL(accountID, name),
+		NoAccountId,
+		executor.StatementOption{}.WithDisableLog(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer res.Close()
+	var connectionID uint64
+	var disabled bool
+	res.ReadRows(func(rows int, cols []*vector.Vector) bool {
+		if rows == 0 || len(cols) < 18 {
+			return true
+		}
+		ids := executor.GetFixedRows[uint64](cols[1])
+		disabledValues := executor.GetFixedRows[uint64](cols[17])
+		if len(ids) > 0 {
+			connectionID = ids[0]
+		}
+		if len(disabledValues) > 0 {
+			disabled = disabledValues[0] != 0
+		}
+		return false
+	})
+	if connectionID == 0 || disabled {
+		return 0, moerr.NewInvalidInputf(c.proc.Ctx, "MongoDB connection %s does not exist or is disabled", name)
+	}
+	return connectionID, nil
+}
+
+func (c *Compile) maybeDeleteMongoDBTableMapping(dbSource engine.Database, rel engine.Relation, tableDef *plan.TableDef) error {
+	createSQL := icebergCreateSQLFromPlanTableDef(tableDef)
+	_, found, err := sqlmongodb.ParseCreateSQLEnvelope(c.proc.Ctx, createSQL)
+	if err != nil || !found {
+		return err
+	}
+	accountID, err := defines.GetAccountId(c.proc.Ctx)
+	if err != nil {
+		return err
+	}
+	dbIDText := dbSource.GetDatabaseId(c.proc.Ctx)
+	dbID, err := strconv.ParseUint(dbIDText, 10, 64)
+	if err != nil || dbID == 0 {
+		return moerr.NewInternalErrorf(c.proc.Ctx, "invalid database id for MongoDB mapping delete: %s", dbIDText)
+	}
+	return c.runSqlWithOptions(
+		sqlmongodb.DeleteTableMappingSQL(accountID, dbID, rel.GetTableID(c.proc.Ctx)),
+		executor.StatementOption{}.WithDisableLog(),
+	)
 }
 
 func (c *Compile) runSqlWithSystemTenant(sql string) error {
@@ -3560,6 +3650,9 @@ func (s *Scope) dropTableSingle(c *Compile, qry *plan.DropTable) error {
 	if err := c.maybeDeleteIcebergTableMapping(dbSource, rel, qry.GetTableDef()); err != nil {
 		return err
 	}
+	if err := c.maybeDeleteMongoDBTableMapping(dbSource, rel, qry.GetTableDef()); err != nil {
+		return err
+	}
 
 	if err := dbSource.Delete(c.proc.Ctx, tblName); err != nil {
 		return err
@@ -3639,8 +3732,8 @@ func (s *Scope) dropTableSingle(c *Compile, qry *plan.DropTable) error {
 			catalog.MO_PITR_CHANGED_TIME, now,
 
 			catalog.MO_PITR_ACCOUNT_ID, accountID,
-			catalog.MO_PITR_DB_NAME, dbName,
-			catalog.MO_PITR_TABLE_NAME, tblName,
+			catalog.MO_PITR_DB_NAME, sqlquote.EscapeString(dbName),
+			catalog.MO_PITR_TABLE_NAME, sqlquote.EscapeString(tblName),
 			catalog.MO_PITR_STATUS, 1,
 			catalog.MO_PITR_OBJECT_ID, tblID,
 		)
@@ -4899,21 +4992,21 @@ func (s *Scope) CreatePitr(c *Compile) error {
                                table_name,
                                obj_id,
                                pitr_length,
-                               pitr_unit,
-                               pitr_status_changed_time) values ('%s', '%s', %d, %d, %d, '%s', %d, '%s', '%s', '%s', %d, %d, '%s', %d)`,
+	                               pitr_unit,
+	                               pitr_status_changed_time) values ('%s', '%s', %d, %d, %d, '%s', %d, '%s', '%s', '%s', %d, %d, '%s', %d)`,
 		newUUid,
-		pitrName,
+		sqlquote.EscapeString(pitrName),
 		createPitr.GetCurrentAccountId(),
 		now,
 		now,
-		pitrLevel.String(),
+		sqlquote.EscapeString(pitrLevel.String()),
 		createPitr.GetCurrentAccountId(),
-		createPitr.GetAccountName(),
-		createPitr.GetDatabaseName(),
-		createPitr.GetTableName(),
+		sqlquote.EscapeString(createPitr.GetAccountName()),
+		sqlquote.EscapeString(createPitr.GetDatabaseName()),
+		sqlquote.EscapeString(createPitr.GetTableName()),
 		pitrObjectID,
 		createPitr.GetPitrValue(),
-		createPitr.GetPitrUnit(),
+		sqlquote.EscapeString(createPitr.GetPitrUnit()),
 		now,
 	)
 
@@ -5097,7 +5190,7 @@ func (s *Scope) DropPitr(c *Compile) error {
 	}
 
 	// 1. Check if PITR exists
-	checkSql := fmt.Sprintf("SELECT pitr_id FROM mo_catalog.mo_pitr WHERE pitr_name = '%s' AND create_account = %d", pitrName, accountId)
+	checkSql := fmt.Sprintf("SELECT pitr_id FROM mo_catalog.mo_pitr WHERE pitr_name = '%s' AND create_account = %d", sqlquote.EscapeString(pitrName), accountId)
 	res, err := c.runSqlWithResultAndOptions(checkSql, int32(sysAccountId), executor.StatementOption{}.WithDisableLog())
 	if err != nil {
 		return err
@@ -5111,7 +5204,7 @@ func (s *Scope) DropPitr(c *Compile) error {
 	}
 
 	// 2. Delete PITR record
-	deleteSql := fmt.Sprintf("DELETE FROM mo_catalog.mo_pitr WHERE pitr_name = '%s' AND create_account = %d", pitrName, accountId)
+	deleteSql := fmt.Sprintf("DELETE FROM mo_catalog.mo_pitr WHERE pitr_name = '%s' AND create_account = %d", sqlquote.EscapeString(pitrName), accountId)
 	err = c.runSqlWithAccountIdAndOptions(deleteSql, int32(sysAccountId), executor.StatementOption{}.WithDisableLog())
 	if err != nil {
 		return err
@@ -5159,14 +5252,14 @@ func getSqlForCheckPitrDup(
 		return getSqlForCheckDupPitrFormat(createPitr.CurrentAccountId, math.MaxUint64)
 	case tree.PITRLEVELACCOUNT:
 		if createPitr.OriginAccountName {
-			return fmt.Sprintf(sql, createPitr.CurrentAccountId) + fmt.Sprintf(" AND account_name = '%s' AND level = 'account' AND pitr_status = 1;", createPitr.AccountName)
+			return fmt.Sprintf(sql, createPitr.CurrentAccountId) + fmt.Sprintf(" AND account_name = '%s' AND level = 'account' AND pitr_status = 1;", sqlquote.EscapeString(createPitr.AccountName))
 		} else {
-			return fmt.Sprintf(sql, createPitr.CurrentAccountId) + fmt.Sprintf(" AND account_name = '%s' AND level = 'account' AND pitr_status = 1;", createPitr.CurrentAccount)
+			return fmt.Sprintf(sql, createPitr.CurrentAccountId) + fmt.Sprintf(" AND account_name = '%s' AND level = 'account' AND pitr_status = 1;", sqlquote.EscapeString(createPitr.CurrentAccount))
 		}
 	case tree.PITRLEVELDATABASE:
-		return fmt.Sprintf(sql, createPitr.CurrentAccountId) + fmt.Sprintf(" AND database_name = '%s' AND level = 'database' AND pitr_status = 1;", createPitr.DatabaseName)
+		return fmt.Sprintf(sql, createPitr.CurrentAccountId) + fmt.Sprintf(" AND database_name = '%s' AND level = 'database' AND pitr_status = 1;", sqlquote.EscapeString(createPitr.DatabaseName))
 	case tree.PITRLEVELTABLE:
-		return fmt.Sprintf(sql, createPitr.CurrentAccountId) + fmt.Sprintf(" AND database_name = '%s' AND table_name = '%s' AND level = 'table' AND pitr_status = 1;", createPitr.DatabaseName, createPitr.TableName)
+		return fmt.Sprintf(sql, createPitr.CurrentAccountId) + fmt.Sprintf(" AND database_name = '%s' AND table_name = '%s' AND level = 'table' AND pitr_status = 1;", sqlquote.EscapeString(createPitr.DatabaseName), sqlquote.EscapeString(createPitr.TableName))
 	}
 	return sql
 }
@@ -5224,7 +5317,7 @@ func CheckSysMoCatalogPitrResult(ctx context.Context, vecs []*vector.Vector, new
 }
 
 func getSqlForCheckPitrExists(pitrName string, accountId uint32) string {
-	return fmt.Sprintf("SELECT pitr_id FROM mo_catalog.mo_pitr WHERE pitr_name = '%s' AND create_account = %d ORDER BY pitr_id", pitrName, accountId)
+	return fmt.Sprintf("SELECT pitr_id FROM mo_catalog.mo_pitr WHERE pitr_name = '%s' AND create_account = %d ORDER BY pitr_id", sqlquote.EscapeString(pitrName), accountId)
 }
 
 func (s *Scope) CreateCDC(c *Compile) error {
@@ -5506,8 +5599,8 @@ func deleteManyWatermark(
 }
 
 const (
-	defaultConnectorTaskMaxRetryTimes = 10
-	defaultConnectorTaskRetryInterval = int64(time.Second * 10)
+	defaultCDCTaskMaxRetryTimes = 10
+	defaultCDCTaskRetryInterval = int64(time.Second * 10)
 )
 
 func (opts *CDCCreateTaskOptions) BuildTaskMetadata() task.TaskMetadata {
@@ -5515,8 +5608,8 @@ func (opts *CDCCreateTaskOptions) BuildTaskMetadata() task.TaskMetadata {
 		ID:       opts.TaskId,
 		Executor: task.TaskCode_InitCdc,
 		Options: task.TaskOptions{
-			MaxRetryTimes: defaultConnectorTaskMaxRetryTimes,
-			RetryInterval: defaultConnectorTaskRetryInterval,
+			MaxRetryTimes: defaultCDCTaskMaxRetryTimes,
+			RetryInterval: defaultCDCTaskRetryInterval,
 			DelayDuration: 0,
 			Concurrency:   0,
 		},
@@ -6021,15 +6114,13 @@ func (c *Compile) checkPitrGranularity(
 		}
 
 		checkDBByName := func(nameLower string) (bool, error) {
-			qDB := fmt.Sprintf(`select pitr_length,pitr_unit from %s.%s where level='database' and lower(database_name) = '%s' and account_id = %d`,
-				catalog.MO_CATALOG, catalog.MO_PITR, nameLower, accountId)
+			qDB := getPitrDatabaseGranularitySql(nameLower, accountId, true)
 			if ok, err := checkQuery(qDB); err != nil {
 				return false, err
 			} else if ok {
 				return true, nil
 			}
-			qDB2 := fmt.Sprintf(`select pitr_length,pitr_unit from %s.%s where level='database' and lower(database_name) = '%s'`,
-				catalog.MO_CATALOG, catalog.MO_PITR, nameLower)
+			qDB2 := getPitrDatabaseGranularitySql(nameLower, accountId, false)
 			return checkQuery(qDB2)
 		}
 
@@ -6066,8 +6157,7 @@ func (c *Compile) checkPitrGranularity(
 
 		// 3) table level only for table pattern
 		if !isDB {
-			qTbl := fmt.Sprintf(`select pitr_length,pitr_unit from %s.%s where level='table' and lower(database_name)='%s' and lower(table_name)='%s' and account_id = %d`,
-				catalog.MO_CATALOG, catalog.MO_PITR, dbNameLower, tblNameLower, accountId)
+			qTbl := getPitrTableGranularitySql(dbNameLower, tblNameLower, accountId)
 			if ok, err := checkQuery(qTbl); err != nil {
 				return err
 			} else if ok {
@@ -6079,6 +6169,22 @@ func (c *Compile) checkPitrGranularity(
 			"PITR config of %s.%s insufficient (<%dh)", pt.Source.Database, pt.Source.Table, minPitrLen)
 	}
 	return nil
+}
+
+func getPitrDatabaseGranularitySql(nameLower string, accountId uint32, withAccount bool) string {
+	nameLit := sqlquote.EscapeString(nameLower)
+	if withAccount {
+		return fmt.Sprintf(`select pitr_length,pitr_unit from %s.%s where level='database' and lower(database_name) = '%s' and account_id = %d`,
+			catalog.MO_CATALOG, catalog.MO_PITR, nameLit, accountId)
+	}
+	return fmt.Sprintf(`select pitr_length,pitr_unit from %s.%s where level='database' and lower(database_name) = '%s'`,
+		catalog.MO_CATALOG, catalog.MO_PITR, nameLit)
+}
+
+func getPitrTableGranularitySql(dbNameLower, tblNameLower string, accountId uint32) string {
+	return fmt.Sprintf(`select pitr_length,pitr_unit from %s.%s where level='table' and lower(database_name)='%s' and lower(table_name)='%s' and account_id = %d`,
+		catalog.MO_CATALOG, catalog.MO_PITR,
+		sqlquote.EscapeString(dbNameLower), sqlquote.EscapeString(tblNameLower), accountId)
 }
 
 func toHours(val int64, unit string) int64 {
