@@ -24,7 +24,7 @@ update bool_conf_src set payload = 'src-true' where payload = 'base-true';
 data branch pick bool_conf_src into bool_conf_dst keys(0);
 select k, payload from bool_conf_dst order by k;
 update bool_conf_dst set payload = 'dst-true' where payload = 'base-true';
--- @regex("conflict: bool_conf_src INSERT and bool_conf_dst INSERT on pk\\(true\\) with different values",true)
+-- @regex("conflict: bool_conf_src INSERT and bool_conf_dst INSERT on pk\(true\) with different values",true)
 data branch pick bool_conf_src into bool_conf_dst keys(1) when conflict fail;
 select k, payload from bool_conf_dst order by k;
 data branch pick bool_conf_src into bool_conf_dst keys(1) when conflict accept;
@@ -99,10 +99,10 @@ select hex(k), payload from bit64_dst order by k;
 data branch create table bit8_bad_src from bit8_base;
 data branch create table bit8_bad_dst from bit8_base;
 update bit8_bad_src set payload = 'changed' where hex(k) = 'FF';
--- @regex("data type bit\\(8\\), value '256'",true)
+-- @regex("data type bit\(8\), value '256'",true)
 data branch pick bit8_bad_src into bit8_bad_dst keys(256);
 select hex(k), payload from bit8_bad_dst order by k;
--- @regex("data type bit\\(8\\), value '-1'",true)
+-- @regex("data type bit\(8\), value '-1'",true)
 data branch pick bit8_bad_src into bit8_bad_dst keys(-1);
 select hex(k), payload from bit8_bad_dst order by k;
 
