@@ -107,6 +107,7 @@ func DeepCopyUpdateCtxList(updateCtxList []*plan.UpdateCtx) []*plan.UpdateCtx {
 			SkipInsertOnNullPk:    ctx.SkipInsertOnNullPk,
 			InsertPkColIdx:        ctx.InsertPkColIdx,
 			CountDeleteAffectRows: ctx.CountDeleteAffectRows,
+			IgnoreAffectedRows:    ctx.IgnoreAffectedRows,
 		}
 	}
 
@@ -252,6 +253,7 @@ func DeepCopyNode(node *plan.Node) *plan.Node {
 
 		TimeWindowPartitionBy:     DeepCopyExprList(node.TimeWindowPartitionBy),
 		TimeWindowPartitionColPos: slices.Clone(node.TimeWindowPartitionColPos),
+		FuzzyBuildSide:            node.FuzzyBuildSide,
 
 		DeleteCtx:              DeepCopyDeleteCtx(node.DeleteCtx),
 		TblFuncExprList:        DeepCopyExprList(node.TblFuncExprList),
@@ -276,6 +278,19 @@ func DeepCopyNode(node *plan.Node) *plan.Node {
 		DirectView:             node.DirectView,
 		RankOption:             DeepCopyRankOption(node.RankOption),
 		RecursiveUnionDistinct: node.RecursiveUnionDistinct,
+		SpillMem:               node.SpillMem,
+		RuntimeFilterProbeList: DeepCopyRuntimeFilterSpecList(
+			node.RuntimeFilterProbeList),
+		RuntimeFilterBuildList: DeepCopyRuntimeFilterSpecList(
+			node.RuntimeFilterBuildList),
+		IfInsertFromUnique: node.IfInsertFromUnique,
+	}
+	if node.Fuzzymessage != nil {
+		newNode.Fuzzymessage = &plan.OriginTableMessageForFuzzy{
+			ParentTableName: node.Fuzzymessage.ParentTableName,
+			ParentUniqueCols: DeepCopyColDefList(
+				node.Fuzzymessage.ParentUniqueCols),
+		}
 	}
 	newNode.Uuid = append(newNode.Uuid, node.Uuid...)
 
@@ -375,6 +390,7 @@ func DeepCopyType(typ *plan.Type) *plan.Type {
 		Width:       typ.Width,
 		Scale:       typ.Scale,
 		AutoIncr:    typ.AutoIncr,
+		Table:       typ.Table,
 		Enumvalues:  typ.Enumvalues,
 	}
 }
@@ -660,6 +676,8 @@ func DeepCopyQuery(qry *plan.Query) *plan.Query {
 		Params:              DeepCopyExprList(qry.Params),
 		Headings:            qry.Headings,
 		HasForeignKeyAction: qry.HasForeignKeyAction,
+		HasReturning:        qry.HasReturning,
+		ReturningStep:       qry.ReturningStep,
 		DetectSqls:          slices.Clone(qry.DetectSqls),
 		CatalogDependencies: make([]*plan.ObjectRef, len(qry.CatalogDependencies)),
 	}
@@ -899,12 +917,32 @@ func DeepCopyRuntimeFilterSpec(rf *plan.RuntimeFilterSpec) *plan.RuntimeFilterSp
 		return nil
 	}
 	return &plan.RuntimeFilterSpec{
-		Tag:         rf.Tag,
-		MatchPrefix: rf.MatchPrefix,
-		UpperLimit:  rf.UpperLimit,
-		Expr:        DeepCopyExpr(rf.Expr),
-		NotOnPk:     rf.NotOnPk,
+		Tag:                 rf.Tag,
+		MatchPrefix:         rf.MatchPrefix,
+		UpperLimit:          rf.UpperLimit,
+		Expr:                DeepCopyExpr(rf.Expr),
+		BuildExpr:           DeepCopyExpr(rf.BuildExpr),
+		NotOnPk:             rf.NotOnPk,
+		UseMembershipFilter: rf.UseMembershipFilter,
+		KeyEncoding:         rf.KeyEncoding,
+		ProbeType:           DeepCopyType(rf.ProbeType),
+		KeyComponentProbeTypes: slices.Clone(
+			rf.KeyComponentProbeTypes,
+		),
 	}
+}
+
+func DeepCopyRuntimeFilterSpecList(
+	specs []*plan.RuntimeFilterSpec,
+) []*plan.RuntimeFilterSpec {
+	if specs == nil {
+		return nil
+	}
+	cloned := make([]*plan.RuntimeFilterSpec, len(specs))
+	for i := range specs {
+		cloned[i] = DeepCopyRuntimeFilterSpec(specs[i])
+	}
+	return cloned
 }
 
 func DeepCopyExpr(expr *Expr) *Expr {

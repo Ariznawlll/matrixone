@@ -115,6 +115,39 @@ func TestQuantifiedTableSubqueryParse(t *testing.T) {
 	}
 }
 
+func TestSelectSharedLockParse(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{
+			name: "for share",
+			sql:  "SELECT id FROM t WHERE id = '1' FOR SHARE",
+			want: "select id from t where id = 1 for share",
+		},
+		{
+			name: "lock in share mode",
+			sql:  "SELECT id FROM t WHERE id = '1' LOCK IN SHARE MODE",
+			want: "select id from t where id = 1 for share",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stmt, err := ParseOne(context.Background(), test.sql, 1)
+			require.NoError(t, err)
+			defer stmt.Free()
+
+			selectStmt, ok := stmt.(*tree.Select)
+			require.True(t, ok)
+			require.NotNil(t, selectStmt.SelectLockInfo)
+			require.Equal(t, tree.SelectLockForShare, selectStmt.SelectLockInfo.LockType)
+			require.Equal(t, test.want, tree.String(stmt, dialect.MYSQL))
+		})
+	}
+}
+
 func TestSQLModeParserModes(t *testing.T) {
 	t.Run("ansi quotes changes double quoted token from string to identifier", func(t *testing.T) {
 		stmt, err := ParseOneWithSQLMode(context.Background(), `select "abc"`, 1, "")
@@ -183,6 +216,30 @@ func TestSQLModeParserModes(t *testing.T) {
 		require.Len(t, fn.Exprs, 2)
 		_, ok = fn.Exprs[1].(*tree.UnaryExpr)
 		require.True(t, ok)
+	})
+
+	t.Run("PIPES_AS_CONCAT works as an unparenthesized LIKE pattern", func(t *testing.T) {
+		stmt, err := ParseOneWithSQLMode(
+			context.Background(),
+			`select 'Jack' like '%'||?||'%'`,
+			1,
+			"PIPES_AS_CONCAT",
+		)
+		require.NoError(t, err)
+		defer stmt.Free()
+
+		likeExpr, ok := firstSelectExpr(t, stmt).(*tree.ComparisonExpr)
+		require.True(t, ok)
+		require.Equal(t, tree.LIKE, likeExpr.Op)
+		outerConcat, ok := likeExpr.Right.(*tree.FuncExpr)
+		require.True(t, ok)
+		require.Equal(t, "concat", outerConcat.Func.FunctionReference.(*tree.UnresolvedName).ColName())
+		require.Len(t, outerConcat.Exprs, 2)
+		innerConcat, ok := outerConcat.Exprs[0].(*tree.FuncExpr)
+		require.True(t, ok)
+		require.Equal(t, "concat", innerConcat.Func.FunctionReference.(*tree.UnresolvedName).ColName())
+		require.Len(t, innerConcat.Exprs, 2)
+		require.IsType(t, &tree.ParamExpr{}, innerConcat.Exprs[1])
 	})
 
 	t.Run("session parser mode does not inject PIPES_AS_CONCAT", func(t *testing.T) {
@@ -769,6 +826,157 @@ func TestDataBranchCreateTablePreservesQuotedApostropheIdentifier(t *testing.T) 
 	require.True(t, ok)
 	require.Equal(t, tree.Identifier("quote'dst"), branchStmt.CreateTable.Table.ObjectName)
 	require.Equal(t, tree.Identifier("quote'src"), branchStmt.SrcTable.ObjectName)
+}
+
+func TestDataBranchStatementFormatRoundTrip(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{
+			name: "create table",
+			sql:  "data branch create table `dst``table` from `src``table` to account `acc``name`",
+			want: "data branch create table `dst``table` from `src``table` to account `acc``name`",
+		},
+		{
+			name: "delete table",
+			sql:  "data branch delete table `db``name`.`table``name`",
+			want: "data branch delete table `db``name`.`table``name`",
+		},
+		{
+			name: "create database",
+			sql:  "data branch create database `dst``db` from `src``db`{snapshot='snap''one'} to account `acc``name`",
+			want: "data branch create database `dst``db` from `src``db`{snapshot = 'snap''one'} to account `acc``name`",
+		},
+		{
+			name: "delete database",
+			sql:  "data branch delete database `db``name`",
+			want: "data branch delete database `db``name`",
+		},
+		{
+			name: "diff output as",
+			sql:  "data branch diff `db`.`target`{snapshot='target snap'} against `db`.`base`{snapshot='base snap'} columns (`id`, `select`) output as `out`.`result`",
+			want: "data branch diff `db`.`target`{snapshot = 'target snap'} against `db`.`base`{snapshot = 'base snap'} columns (`id`, `select`) output as `out`.`result`",
+		},
+		{
+			name: "diff output empty file",
+			sql:  "data branch diff target against base output file ''",
+			want: "data branch diff `target` against `base` output file ''",
+		},
+		{
+			name: "diff output file",
+			sql:  "data branch diff target against base output file '/tmp/branch''s/'",
+			want: "data branch diff `target` against `base` output file '/tmp/branch''s/'",
+		},
+		{
+			name: "diff output zero limit",
+			sql:  "data branch diff target against base output limit 0",
+			want: "data branch diff `target` against `base` output limit 0",
+		},
+		{
+			name: "diff output count",
+			sql:  "data branch diff target against base output count",
+			want: "data branch diff `target` against `base` output count",
+		},
+		{
+			name: "diff output summary",
+			sql:  "data branch diff target against base output summary",
+			want: "data branch diff `target` against `base` output summary",
+		},
+		{
+			name: "merge default conflict behavior",
+			sql:  "data branch merge src into dst",
+			want: "data branch merge `src` into `dst`",
+		},
+		{
+			name: "merge explicit conflict behavior",
+			sql:  "data branch merge src into dst when conflict skip",
+			want: "data branch merge `src` into `dst` when conflict skip",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stmt, err := ParseOne(context.Background(), test.sql, 1)
+			require.NoError(t, err)
+			defer stmt.Free()
+
+			formatted := tree.String(stmt, dialect.MYSQL)
+			require.Equal(t, test.want, formatted)
+
+			reparsed, err := ParseOne(context.Background(), formatted, 1)
+			require.NoError(t, err)
+			defer reparsed.Free()
+			require.IsType(t, stmt, reparsed)
+			require.Equal(t, formatted, tree.String(reparsed, dialect.MYSQL))
+		})
+	}
+}
+
+func TestDataBranchPickFormatRoundTrip(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		sql          string
+		want         string
+		wantSrcDB    tree.Identifier
+		wantSrc      tree.Identifier
+		wantDst      tree.Identifier
+		wantFrom     string
+		wantTo       string
+		wantKeys     bool
+		wantConflict int
+	}{
+		{
+			name:         "quoted tables",
+			sql:          "data branch pick `select`.`src``table` into `dst``table` keys (1) when conflict skip",
+			want:         "data branch pick `select`.`src``table` into `dst``table` keys (1) when conflict skip",
+			wantSrcDB:    tree.Identifier("select"),
+			wantSrc:      tree.Identifier("src`table"),
+			wantDst:      tree.Identifier("dst`table"),
+			wantKeys:     true,
+			wantConflict: tree.CONFLICT_SKIP,
+		},
+		{
+			name:         "string snapshots",
+			sql:          "data branch pick src into dst between snapshot 'snap one' and 'snap''two' when conflict accept",
+			want:         "data branch pick `src` into `dst` between snapshot 'snap one' and 'snap''two' when conflict accept",
+			wantSrc:      tree.Identifier("src"),
+			wantDst:      tree.Identifier("dst"),
+			wantFrom:     "snap one",
+			wantTo:       "snap'two",
+			wantConflict: tree.CONFLICT_ACCEPT,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stmt, err := ParseOne(context.Background(), test.sql, 1)
+			require.NoError(t, err)
+			defer stmt.Free()
+
+			formatted := tree.String(stmt, dialect.MYSQL)
+			require.Equal(t, test.want, formatted)
+
+			reparsed, err := ParseOne(context.Background(), formatted, 1)
+			require.NoError(t, err)
+			defer reparsed.Free()
+
+			pick, ok := reparsed.(*tree.DataBranchPick)
+			require.True(t, ok)
+			require.Equal(t, test.wantSrcDB, pick.SrcTable.SchemaName)
+			require.Equal(t, test.wantSrc, pick.SrcTable.ObjectName)
+			require.Equal(t, test.wantDst, pick.DstTable.ObjectName)
+			require.Equal(t, test.wantFrom, pick.BetweenFrom)
+			require.Equal(t, test.wantTo, pick.BetweenTo)
+			if test.wantKeys {
+				require.NotNil(t, pick.Keys)
+				require.Equal(t, tree.PickKeysValues, pick.Keys.Type)
+				require.Len(t, pick.Keys.KeyExprs, 1)
+			} else {
+				require.Nil(t, pick.Keys)
+			}
+			require.NotNil(t, pick.ConflictOpt)
+			require.Equal(t, test.wantConflict, pick.ConflictOpt.Opt)
+			require.Equal(t, formatted, tree.String(reparsed, dialect.MYSQL))
+		})
+	}
 }
 
 func TestDataBranchDiffOutputModes(t *testing.T) {
