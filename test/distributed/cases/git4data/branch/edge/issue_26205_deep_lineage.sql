@@ -55,4 +55,98 @@ where t.account_id = 0
   )
   and b.table_deleted = false;
 
+-- Keep stable table ids after their physical tables are deleted.  Deleting an
+-- intermediate owner must retain its protect snapshot while a descendant is
+-- alive, and the surviving branches must remain usable through that history.
+create table lineage_ids(name varchar(32) primary key, table_id bigint unsigned);
+insert into lineage_ids
+select relname, rel_id
+from mo_catalog.mo_tables
+where account_id = 0
+  and reldatabase = 'bvt_issue_26205'
+  and relname in (
+      'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8',
+      'b9', 'b10', 'b11', 'b12', 'b13', 'b14', 'b15', 'b16',
+      'sibling'
+  );
+
+data branch delete table b8;
+select b.table_deleted as deleted_intermediate
+from lineage_ids i
+join mo_catalog.mo_branch_metadata b on b.table_id = i.table_id
+where i.name = 'b8';
+select count(*) as protected_intermediate_snapshots
+from lineage_ids i
+join mo_catalog.mo_snapshots s
+  on s.sname = concat('__mo_branch_', cast(i.table_id as char))
+ and s.kind = 'branch'
+where i.name = 'b8';
+
+data branch diff b16 against sibling output summary;
+data branch create table post_delete_dst from b0;
+data branch pick sibling into post_delete_dst keys(1, 2, 3, 5);
+select id, val from post_delete_dst order by id;
+
+-- Delete the long descendant path parent-first.  b8 stays protected by its
+-- live sibling, while the drained b9..b16 path is reclaimed synchronously.
+data branch delete table b9;
+data branch delete table b10;
+data branch delete table b11;
+data branch delete table b12;
+data branch delete table b13;
+data branch delete table b14;
+data branch delete table b15;
+data branch delete table b16;
+select count(*) as live_split_owner_snapshots
+from lineage_ids i
+join mo_catalog.mo_snapshots s
+  on s.sname = concat('__mo_branch_', cast(i.table_id as char))
+ and s.kind = 'branch'
+where i.name in ('b8', 'sibling');
+select count(*) as drained_descendant_snapshots
+from lineage_ids i
+join mo_catalog.mo_snapshots s
+  on s.sname = concat('__mo_branch_', cast(i.table_id as char))
+ and s.kind = 'branch'
+where i.name in ('b9', 'b10', 'b11', 'b12', 'b13', 'b14', 'b15', 'b16');
+data branch diff sibling against b0 output summary;
+
+-- Once the sibling and the final live descendant are gone, no protect
+-- snapshot from the original lineage may remain.
+data branch delete table sibling;
+select count(*) as intermediate_snapshots_after_last_child
+from lineage_ids i
+join mo_catalog.mo_snapshots s
+  on s.sname = concat('__mo_branch_', cast(i.table_id as char))
+ and s.kind = 'branch'
+where i.name = 'b8';
+
+data branch delete table b1;
+select count(*) as root_snapshots_with_live_descendant
+from lineage_ids i
+join mo_catalog.mo_snapshots s
+  on s.sname = concat('__mo_branch_', cast(i.table_id as char))
+ and s.kind = 'branch'
+where i.name = 'b1';
+data branch delete table b2;
+data branch delete table b3;
+data branch delete table b4;
+data branch delete table b5;
+data branch delete table b6;
+data branch delete table b7;
+
+select count(*) as remaining_lineage_snapshots
+from lineage_ids i
+join mo_catalog.mo_snapshots s
+  on s.sname = concat('__mo_branch_', cast(i.table_id as char))
+ and s.kind = 'branch';
+select count(*) as deleted_lineage_rows
+from lineage_ids i
+join mo_catalog.mo_branch_metadata b on b.table_id = i.table_id
+where b.table_deleted = true;
+
+data branch delete table post_delete_dst;
+data branch delete table merge_dst;
+data branch delete table pick_dst;
+
 drop database bvt_issue_26205;
