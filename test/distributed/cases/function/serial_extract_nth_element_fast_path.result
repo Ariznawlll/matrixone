@@ -1,0 +1,61 @@
+CREATE TABLE t_serial_extract (
+id INT PRIMARY KEY,
+tuple_col VARBINARY
+);
+You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ')' at line 4
+INSERT INTO t_serial_extract VALUES
+(1, serial_pack(NULL, 8, 16, 32, 64, 18, 116, 132, 164, TRUE, FALSE, 3.14, 2.718, DATE '2022-01-01', DATETIME '2022-01-01 12:34:56', TIMESTAMP '2022-01-01 12:34:56', DECIMAL64 '999', DECIMAL128 '1234567890123456789012345678901234', 'hello', UUID(), OBJECTID())),
+(2, serial_pack(400, 2024, 0xBEEF, OBJECTID(), NULL));
+Incorrect parameters in the call to stored function `serial_pack`
+SELECT id, serial_extract(tuple_col, 1, INT8) AS int8_val FROM t_serial_extract ORDER BY id;
+You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'INT8) AS int8_val FROM t_serial_extract ORDER BY id' at line 1
+SELECT id, serial_extract(tuple_col, 2, INT16) AS int16_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 3, INT32) AS int32_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 4, INT64) AS int64_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 5, UINT8) AS uint8_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 6, UINT16) AS uint16_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 7, UINT32) AS uint32_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 8, UINT64) AS uint64_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 9, BOOL) AS bool_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 10, BOOL) AS bool_val2 FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 11, FLOAT32) AS float32_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 12, FLOAT64) AS float64_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 13, DATE) AS date_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 14, DATETIME) AS datetime_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 15, TIMESTAMP) AS timestamp_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 16, DECIMAL64) AS decimal64_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 17, DECIMAL128) AS decimal128_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 18, VARCHAR) AS varchar_val FROM t_serial_extract ORDER BY id;
+You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'VARCHAR) AS varchar_val FROM t_serial_extract ORDER BY id' at line 1
+SELECT id, serial_extract(tuple_col, 19, UUID) AS uuid_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 20, OBJECTID) AS objectid_val FROM t_serial_extract ORDER BY id;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 0, TIME) AS time_val FROM t_serial_extract WHERE id=2;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 1, YEAR) AS year_val FROM t_serial_extract WHERE id=2;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 2, BIT) AS bit_val FROM t_serial_extract WHERE id=2;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 3, OBJECTID) AS objectid_val2 FROM t_serial_extract WHERE id=2;
+SELECT command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
+SELECT id, serial_extract(tuple_col, 100, INT8) AS out_of_range FROM t_serial_extract ORDER BY id;
+You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'INT8) AS out_of_range FROM t_serial_extract ORDER BY id' at line 1
+DROP TABLE t_serial_extract;
+DROP command denied to user 'test_team'@'172.208.153.225' for table 't_serial_extract'
