@@ -4,8 +4,8 @@ mkdir -p qa-evidence "$RUNNER_TEMP/qa30051-stage"
 IMAGE='ccr.ccs.tencentyun.com/matrixone-dev/matrixone@sha256:8d69616787d272d19986f48fe80ff83f056313ae1ceca94c98bc7847a2fde125'
 printf 'product_commit=a54850983d9cddaacc97e38a84515ec724c937b7\nimage=%s\n' "$IMAGE" > qa-evidence/provenance.txt
 git rev-parse HEAD >> qa-evidence/provenance.txt
-sha256sum clients/python/matrixone/_local_infile.py >> qa-evidence/provenance.txt
-printf 'MALLOC_ARENA_MAX=unset\n' >> qa-evidence/provenance.txt
+sha256sum clients/python/matrixone/_local_infile.py clients/python/matrixone/analytics.py >> qa-evidence/provenance.txt
+python -c "import os; assert 'MALLOC_ARENA_MAX' not in os.environ; print('MALLOC_ARENA_MAX=unset')" >> qa-evidence/provenance.txt
 uname -a >> qa-evidence/provenance.txt
 python --version >> qa-evidence/provenance.txt
 python -c 'import sqlalchemy,pyarrow,pymysql,platform; print(platform.machine(),sqlalchemy.__version__,pyarrow.__version__,pymysql.__version__)' >> qa-evidence/provenance.txt
@@ -15,9 +15,12 @@ python .github/qa30051/bootstrap.py | tee qa-evidence/bootstrap.log
 python -m pytest --import-mode=importlib -q clients/python/tests/offline/contracts/test_local_infile.py clients/python/tests/offline/contracts/test_wave2_boundaries.py clients/python/tests/offline/test_connection_contracts.py | tee qa-evidence/offline.log
 python .github/qa30051/guard_lifetime_probe.py guard-preferred | tee qa-evidence/lifetime.json
 python .github/qa30051/guard_async_probe.py | tee qa-evidence/async-lifetime.json
-for op in stream reject; do
- for mode in preferred disabled; do
-  MO_PORT=6003 MO_DATABASE=mo_analytics_test python .github/qa30051/isolate.py "$op" "$mode" "$RUNNER_TEMP/qa30051-stage" > "qa-evidence/attribution-$op-$mode.log" 2>&1
- done
+for n in 1 2 3; do
+  python .github/qa30051/live-lifetime.py > "qa-evidence/live-lifetime-$n.json"
+done
+MO_ANALYTICS_ONLINE=1 MO_PORT=6003 MO_DATABASE=mo_analytics_test PYTHONPATH="$PWD/clients/python/tests/analytics:${PYTHONPATH:-}" python -m pytest --import-mode=importlib -q --basetemp="$RUNNER_TEMP/qa30051-stage/pytest" clients/python/tests/analytics/test_analytics.py::test_early_close_and_bound_batch clients/python/tests/analytics/test_analytics.py::test_query_errors_cleanup_and_pool_reuse clients/python/tests/analytics/test_relation_ownership.py::test_stream_source_error_keeps_precedence_over_cleanup clients/python/tests/analytics/test_relation_ownership.py::test_stream_validation_cursor_close_keeps_primary_error | tee qa-evidence/stream-contracts.log
+for n in 1 2 3; do
+  MO_PORT=6003 MO_DATABASE=mo_analytics_test python clients/python/tests/analytics/run_soak.py --staging-dir "$RUNNER_TEMP/qa30051-stage" --output "qa-evidence/round-$n.json" --warmup-seconds 30 --seconds 90 --workers 8 --rows 1000000 > "qa-evidence/round-$n.log" 2>&1
+  python .github/qa30051/verify.py "qa-evidence/round-$n.json" | tee "qa-evidence/round-$n-summary.json"
 done
 python .github/qa30051/check-cleanup.py | tee qa-evidence/cleanup.json
