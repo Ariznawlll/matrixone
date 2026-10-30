@@ -23,3 +23,5 @@ r={'scope':'instrumented diagnostic, S07 skipped, not a gate result','error':err
 if len(snaps)==2:
  a,b=snaps;r['snapshot_times']=[a[2],b[2]];r['python_allocations']=[str(x) for x in b[0].compare_to(a[0],'lineno')[:35]];r['object_growth']=(b[1]-a[1]).most_common(35)
 Path('qa-evidence/profile.json').write_text(json.dumps(r,indent=2)+'\n');print(json.dumps({'scope':r['scope'],'error':error,'snapshot_count':len(snaps),'rss_before':before,'rss_after_gc':aftergc,'rss_after_trim':trim}))
+
+if len(snaps)!=2 or error and error['type']!='AssertionError': raise SystemExit('diagnostic did not capture the intended load')
