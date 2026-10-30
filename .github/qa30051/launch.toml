@@ -1,0 +1,3 @@
+logservices = ["/qa-config/log.toml"]
+tnservices = ["/qa-config/tn.toml"]
+cnservices = ["/qa-config/cn.toml"]
