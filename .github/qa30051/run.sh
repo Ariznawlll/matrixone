@@ -9,7 +9,16 @@ python -c "import os; assert 'MALLOC_ARENA_MAX' not in os.environ; print('MALLOC
 uname -a >> qa-evidence/provenance.txt
 python --version >> qa-evidence/provenance.txt
 python -c 'import sqlalchemy,pyarrow,pymysql,platform; print(platform.machine(),sqlalchemy.__version__,pyarrow.__version__,pymysql.__version__)' >> qa-evidence/provenance.txt
-docker pull --platform linux/amd64 "$IMAGE"
+pulled=0
+for attempt in 1 2 3; do
+  if docker pull --platform linux/amd64 "$IMAGE" > "$RUNNER_TEMP/qa30051-image-pull.log" 2>&1; then
+    pulled=1
+    break
+  fi
+  echo "Image pull failed on attempt $attempt; retrying."
+  sleep 5
+done
+if [ "$pulled" != 1 ]; then echo 'Image pull failed after 3 attempts'; exit 1; fi
 docker run -d --name qa30051-mo --network host --workdir / -v "$PWD/.github/qa30051:/qa-config:ro" -v "$RUNNER_TEMP/qa30051-stage:$RUNNER_TEMP/qa30051-stage" --entrypoint /mo-service "$IMAGE" -debug-http=:12345 -launch /qa-config/launch.toml
 python .github/qa30051/bootstrap.py | tee qa-evidence/bootstrap.log
 python -m pytest --import-mode=importlib -q clients/python/tests/offline/contracts/test_local_infile.py clients/python/tests/offline/contracts/test_wave2_boundaries.py clients/python/tests/offline/test_connection_contracts.py | tee qa-evidence/offline.log
