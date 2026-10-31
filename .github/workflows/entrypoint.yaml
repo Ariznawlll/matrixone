@@ -1,39 +1,40 @@
-name: QA 30051 native Linux temporary
+name: QA 29945 exact main build
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  native-linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: matrixorigin/matrixone
+          ref: ae40f12a647880a63466de32a9f507c2c72dca0b
           persist-credentials: false
-          sparse-checkout: |
-            .github/qa30051
-            clients/python
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install SDK and test dependencies
-        run: python -m pip install -e 'clients/python[analytics,test]' 'SQLAlchemy[asyncio]==2.1.6' 'pyarrow==21.0.0' 'PyMySQL==1.2.3'
-      - name: Run native Linux validation
-        run: bash .github/qa30051/run.sh
-      - name: Collect diagnostics
-        if: always()
+      - name: Build pinned official main
+        shell: bash
         run: |
-          mkdir -p qa-evidence
-          docker inspect qa30051-mo --format 'state={{.State.Status}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' > qa-evidence/container-state.txt 2>/dev/null || true
-          docker logs qa30051-mo > qa-evidence/server.log 2>&1 || true
-      - name: Upload test evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ae40f12a647880a63466de32a9f507c2c72dca0b
+          timeout 300 docker pull matrixorigin/matrixone:ci-builder > /tmp/builder-pull.log 2>&1 || { echo 'CI builder pull failed'; exit 1; }
+          docker run --rm -v "$GITHUB_WORKSPACE":/go/src/github.com/matrixorigin/matrixone -w /go/src/github.com/matrixorigin/matrixone matrixorigin/matrixone:ci-builder bash -c '
+            set -euo pipefail
+            git config --global --add safe.directory "$PWD"
+            if ./optools/images/ci-builder-fingerprint.sh > /tmp/want && cmp -s /tmp/want /mo-prebuilt/thirdparties.fingerprint; then cp -a /mo-prebuilt/thirdparties/install thirdparties/install; fi
+            make build GOBUILD_OPT=-cover
+          '
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+          mkdir -p /tmp/qa29945-build/lib
+          cp mo-service /tmp/qa29945-build/
+          cp thirdparties/install/lib/libmo.so thirdparties/install/lib/libusearch_c.so /tmp/qa29945-build/lib/
+          cp thirdparties/install/lib/onnxruntime.so /tmp/qa29945-build/lib/ || true
+          cp -r dict /tmp/qa29945-build/dict
+          printf '%s\n' ae40f12a647880a63466de32a9f507c2c72dca0b > /tmp/qa29945-build/source-sha.txt
+          tar -czf /tmp/qa29945-main.tar.gz -C /tmp/qa29945-build .
+      - uses: actions/upload-artifact@v4
         with:
-          name: qa30051-native-linux-${{ github.run_id }}-${{ github.run_attempt }}
-          path: qa-evidence/
-          retention-days: 14
-      - name: Stop owned MO container
-        if: always()
-        run: docker stop qa30051-mo || true
+          name: qa29945-official-main-ae40f12
+          path: /tmp/qa29945-main.tar.gz
+          retention-days: 3
