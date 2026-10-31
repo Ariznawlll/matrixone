@@ -1,0 +1,40 @@
+name: QA 29945 exact main build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: ae40f12a647880a63466de32a9f507c2c72dca0b
+          persist-credentials: false
+      - name: Build pinned official main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ae40f12a647880a63466de32a9f507c2c72dca0b
+          timeout 300 docker pull matrixorigin/matrixone:ci-builder > /tmp/builder-pull.log 2>&1 || { echo 'CI builder pull failed'; exit 1; }
+          docker run --rm -v "$GITHUB_WORKSPACE":/go/src/github.com/matrixorigin/matrixone -w /go/src/github.com/matrixorigin/matrixone matrixorigin/matrixone:ci-builder bash -c '
+            set -euo pipefail
+            git config --global --add safe.directory "$PWD"
+            if ./optools/images/ci-builder-fingerprint.sh > /tmp/want && cmp -s /tmp/want /mo-prebuilt/thirdparties.fingerprint; then cp -a /mo-prebuilt/thirdparties/install thirdparties/install; fi
+            make build GOBUILD_OPT=-cover
+          '
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+          mkdir -p /tmp/qa29945-build/lib
+          cp mo-service /tmp/qa29945-build/
+          cp thirdparties/install/lib/libmo.so thirdparties/install/lib/libusearch_c.so /tmp/qa29945-build/lib/
+          cp thirdparties/install/lib/onnxruntime.so /tmp/qa29945-build/lib/ || true
+          cp -r dict /tmp/qa29945-build/dict
+          printf '%s\n' ae40f12a647880a63466de32a9f507c2c72dca0b > /tmp/qa29945-build/source-sha.txt
+          tar -czf /tmp/qa29945-main.tar.gz -C /tmp/qa29945-build .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qa29945-official-main-ae40f12
+          path: /tmp/qa29945-main.tar.gz
+          retention-days: 3
