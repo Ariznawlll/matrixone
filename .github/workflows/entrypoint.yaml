@@ -1,10 +1,10 @@
-name: QA 29945 exact main build
+name: QA 29945 white-box official main
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  build:
+  ewm-focused-tests:
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -13,7 +13,7 @@ jobs:
           repository: matrixorigin/matrixone
           ref: ae40f12a647880a63466de32a9f507c2c72dca0b
           persist-credentials: false
-      - name: Build pinned official main
+      - name: Build and run focused EWM package tests
         shell: bash
         run: |
           set -euo pipefail
@@ -24,17 +24,11 @@ jobs:
             git config --global --add safe.directory "$PWD"
             if ./optools/images/ci-builder-fingerprint.sh > /tmp/want && cmp -s /tmp/want /mo-prebuilt/thirdparties.fingerprint; then cp -a /mo-prebuilt/thirdparties/install thirdparties/install; fi
             make build GOBUILD_OPT=-cover
+            export CGO_CFLAGS="-I$PWD/cgo -I$PWD/thirdparties/install/include"
+            export CGO_LDFLAGS="-L$PWD/cgo -L$PWD/thirdparties/install/lib"
+            export GOEXPERIMENT=simd
+            for pkg in ./pkg/sql/parsers/dialect/mysql ./pkg/sql/plan ./pkg/sql/compile ./pkg/sql/colexec/aggexec ./pkg/sql/colexec/window ./pkg/frontend; do
+              echo "=== EWM PACKAGE: $pkg ==="
+              go test -p 2 -v -count=1 -timeout=10m -run "Ewm|EWM|ewm" "$pkg"
+            done
           '
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
-          mkdir -p /tmp/qa29945-build/lib
-          cp mo-service /tmp/qa29945-build/
-          cp cgo/libmo.so thirdparties/install/lib/libusearch_c.so /tmp/qa29945-build/lib/
-          cp thirdparties/install/lib/onnxruntime.so /tmp/qa29945-build/lib/ || true
-          cp -r dict /tmp/qa29945-build/dict
-          printf '%s\n' ae40f12a647880a63466de32a9f507c2c72dca0b > /tmp/qa29945-build/source-sha.txt
-          tar -czf /tmp/qa29945-main.tar.gz -C /tmp/qa29945-build .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: qa29945-official-main-ae40f12
-          path: /tmp/qa29945-main.tar.gz
-          retention-days: 3
