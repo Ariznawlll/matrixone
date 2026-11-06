@@ -75,6 +75,70 @@ jobs:
           print('black-box checks passed 3/3')
           c.close()
           PY
+      - name: Prepare pinned JDBC regression runner
+        run: |
+          git init -q qa-mo-tester
+          git -C qa-mo-tester remote add origin https://github.com/matrixorigin/mo-tester.git
+          git -C qa-mo-tester fetch --depth=1 origin 309a0ca650e0c55e90292767fd61e4976818d66d
+          git -C qa-mo-tester checkout --detach FETCH_HEAD
+          cd qa-mo-tester
+          mvn -q clean compile jar:jar -DskipTests
+          python3 - <<'PY'
+          p='mo.yml'
+          s=open(p).read()
+          assert '127.0.0.1:6001' in s
+          open(p,'w').write(s.replace('127.0.0.1:6001','127.0.0.1:16001'))
+          PY
+          mkdir -p qa-cases/core qa-cases/expanded qa-resources
+          cp ../test/distributed/cases/dtype/decimal_intermediate_precision.test qa-cases/core/decimal_intermediate_precision.sql
+          cp ../test/distributed/cases/dtype/decimal_intermediate_precision.result qa-cases/core/
+          cp ../test/distributed/cases/expression/decimal_mul_sub.{sql,result} qa-cases/core/
+          cp ../test/distributed/cases/function/func_cast.test qa-cases/expanded/func_cast.sql
+          cp ../test/distributed/cases/function/func_cast.result qa-cases/expanded/
+          cp ../test/distributed/cases/dtype/decimal_256.test qa-cases/expanded/decimal_256.sql
+          cp ../test/distributed/cases/dtype/decimal_256.result qa-cases/expanded/
+          cp ../test/distributed/cases/operator/decimal_temporal_arithmetic_domain.{sql,result} qa-cases/expanded/
+      - name: Run JDBC decimal regression, retaining metadata discrepancies
+        run: |
+          cd qa-mo-tester
+          export JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8
+          for mode in core expanded expanded-values; do
+            for iteration in 1 2 3; do
+              case "$mode" in
+                core) path=qa-cases/core; options='' ;;
+                expanded) path=qa-cases/expanded; options='' ;;
+                expanded-values) path=qa-cases/expanded; options='-n' ;;
+              esac
+              bash run.sh -p "$path" -m run $options > "$mode-$iteration.log" 2>&1 || true
+              MODE="$mode" ITERATION="$iteration" python3 - <<'PY'
+          import collections,os,re
+          mode=os.environ['MODE']; iteration=os.environ['ITERATION']
+          lines=open(f'{mode}-{iteration}.log',errors='replace').read().splitlines()
+          summaries=[x for x in lines if '[SUMMARY]' in x]
+          if not summaries:
+              print(mode,iteration,'NO SUMMARY; infrastructure error')
+              open('../qa-bvt-infrastructure-failed','w').write('missing summary')
+          else:
+              print(mode,iteration,summaries[-1].split('[SUMMARY]',1)[-1])
+              m=re.search(r'TOTAL\s*:\s*(\d+).*SUCCESS\s*:\s*(\d+).*FAILED\s*:\s*(\d+).*ABNORAML\s*:\s*(\d+)',summaries[-1])
+              if not m or int(m.group(3)) or int(m.group(4)):
+                  open('../qa-bvt-'+mode+'-failed','w').write(summaries[-1])
+          differences=collections.Counter()
+          for x in lines:
+              m=re.search(r'one is \[(.*?)\],but the other is \[(.*?)\]',x)
+              if m: differences[(m.group(1),m.group(2)+']')]+=1
+          for (expected,actual),n in differences.most_common(12):
+              print(f'  {n}x expected={expected}; actual={actual}')
+          PY
+            done
+          done
+      - name: Evaluate JDBC regression results
+        run: |
+          if ls qa-bvt-*-failed >/dev/null 2>&1; then
+            echo 'JDBC regression has failures; see per-mode summaries and metadata comparisons above.'
+            exit 1
+          fi
+          echo 'All three JDBC modes passed three times.'
       - name: Diagnostics
         if: failure()
         run: docker logs --tail 100 qa-decimal-mo || true
