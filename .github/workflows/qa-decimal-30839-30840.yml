@@ -1,0 +1,80 @@
+name: Isolated decimal validation
+on:
+  push:
+    branches: [codex/qa-decimal-30839-30840-ee5e93b]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out exact official source
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: ee5e93bcefd4f04bcda6b8e5002eef96038396d3
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify source
+        run: test "$(git rev-parse HEAD)" = ee5e93bcefd4f04bcda6b8e5002eef96038396d3
+      - name: Build isolated native dependencies
+        run: docker build --target native -t qa-decimal-native -f optools/images/Dockerfile .
+      - name: Build exact source and run decimal unit tests
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work qa-decimal-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            go test -count=3 -run "^(TestDecimalCastPrecisionContract|TestDecimalCastScaleGrowthAdmission|TestDecimalWideningConstBatch|TestDecimalCastNullDomain|TestDecimalCastParameterRebinding)$" ./pkg/sql/plan/function
+            make build-with-prebuilt-native LAST_COMMIT_ID=ee5e93bcefd4f04bcda6b8e5002eef96038396d3 BRANCH_NAME=main
+            go version -m mo-service | grep -E "vcs.revision|vcs.modified"
+          '
+      - name: Start isolated MatrixOne
+        run: |
+          docker run -d --name qa-decimal-mo -p 127.0.0.1:16001:6001 -v "$PWD:/work" -w /work -e LD_LIBRARY_PATH=/work/cgo:/work/thirdparties/install/lib --entrypoint /work/mo-service qa-decimal-native -launch etc/quickstart/launch.toml -debug-http=:12345
+          python3 -m pip install --user pymysql
+          python3 - <<'PY'
+          import time,pymysql
+          for _ in range(120):
+              try:
+                  c=pymysql.connect(host='127.0.0.1',port=16001,user='dump',password='111',connect_timeout=2)
+                  with c.cursor() as q:
+                      q.execute('select git_version()')
+                      v=q.fetchone()[0]
+                      print('git_version:',v)
+                      assert v=='ee5e93bcefd4f04bcda6b8e5002eef96038396d3',v
+                  c.close()
+                  break
+              except (pymysql.MySQLError,OSError): time.sleep(2)
+          else: raise RuntimeError('MO did not become ready')
+          PY
+      - name: Run decimal black-box boundaries
+        run: |
+          python3 - <<'PY'
+          from decimal import Decimal
+          import pymysql
+          c=pymysql.connect(host='127.0.0.1',port=16001,user='dump',password='111',autocommit=True)
+          q=c.cursor()
+          for rep in range(3):
+              q.execute("select cast(cast('1.256' as decimal(8,3)) as decimal(8,2)), cast(cast('-1.256' as decimal(8,3)) as decimal(8,2)),cast(null as decimal(20,4))")
+              assert q.fetchone()==(Decimal('1.26'),Decimal('-1.26'),None)
+              q.execute("select cast('1000' as decimal(5,2))")
+              assert q.fetchone()==(Decimal('999.99'),)
+              q.execute('show warnings')
+              assert any(x[1]==1264 for x in q.fetchall())
+              q.execute("select cast(1000000000000000000 as signed)+cast('00:00:00' as time) as n")
+              value=q.fetchone()[0]; meta=q.description[0]
+              assert value==Decimal('1000000000000000000')
+              print('round',rep+1,'temporal-plus value',value,'protocol metadata',meta)
+          print('black-box checks passed 3/3')
+          c.close()
+          PY
+      - name: Diagnostics
+        if: failure()
+        run: docker logs --tail 100 qa-decimal-mo || true
