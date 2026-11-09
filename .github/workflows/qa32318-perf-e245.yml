@@ -19,13 +19,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: matrixorigin/matrixone
-          ref: e2459cc55f4b514893e19732743460bc5f16d552
+          ref: 843929f68611f873ca63674a61ab4b2cdf5ee915
           path: after
       - name: Build paired binaries with matched native dependencies
         run: |
           set -euo pipefail
           test "$(git -C before rev-parse HEAD)" = b19ef50f05ab0e398b65b4cf3f745470f803df09
-          test "$(git -C after rev-parse HEAD)" = e2459cc55f4b514893e19732743460bc5f16d552
+          test "$(git -C after rev-parse HEAD)" = 843929f68611f873ca63674a61ab4b2cdf5ee915
           docker build --target native -t qa32318-native -f after/optools/images/Dockerfile after
           docker run --rm -v "$PWD:/src" -w /src qa32318-native bash -euc '
             git config --global --add safe.directory /src/before
@@ -74,7 +74,7 @@ jobs:
                       assert v==sha,(port,v);return c
                   except (OSError,pymysql.MySQLError):time.sleep(2)
               raise RuntimeError('server not ready '+str(port))
-          cs={'before':connect(16001,'b19ef50f05ab0e398b65b4cf3f745470f803df09'),'after':connect(16002,'e2459cc55f4b514893e19732743460bc5f16d552')}
+          cs={'before':connect(16001,'b19ef50f05ab0e398b65b4cf3f745470f803df09'),'after':connect(16002,'843929f68611f873ca63674a61ab4b2cdf5ee915')}
           def sql(c,s):
               with c.cursor() as q:q.execute(s);return q.fetchall() if q.description else ()
           try:
