@@ -48,10 +48,15 @@ jobs:
           else:raise RuntimeError('MO startup timed out')
           PYWAIT
       - name: Run exact MOTR branch on official 4.2-dev
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git clone --depth 1 --branch codex/issue-32365-42dev-motr https://github.com/Ariznawlll/motr.git /tmp/qa32365-motr
+          mkdir -p /tmp/qa32365-motr
+          gh api "repos/${{ github.repository }}/contents/.qa/qa32365-motr-harness.tar.gz?ref=${{ github.sha }}" --jq .content | base64 -d > /tmp/qa32365-motr.tar.gz
+          echo '41523e3bd5fe754d39f0b2cd1b913d9175ae8953be7891265c58de978874ff0d  /tmp/qa32365-motr.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/qa32365-motr.tar.gz -C /tmp/qa32365-motr
           cd /tmp/qa32365-motr
-          test "$(git rev-parse HEAD)" = 4aacb72323e0364b3c863a40509690ce9d853159
+          mkdir -p suites
           /tmp/qa32365-venv/bin/pip -q install -r requirements.txt
           export PATH=/tmp/qa32365-venv/bin:$PATH
           ./motr --branch 4.2-dev --repeat 3 14_issue_regression.issue_32365_composite_points
