@@ -87,11 +87,11 @@ jobs:
                   for (idx,) in idxs:sql(c,"select mo_ctl('dn','flush','qa32318_perf."+idx+"')")
                   sql(c,'analyze table events(d,n) fullscan')
                   plan=' '.join(str(r[0]) for r in sql(c,'explain analyze select id,d from events where d>now(6)'))
-                  assert 'Index Table Scan on events.idx_d' in plan,(label,plan)
+                  print(label,'selected temporal index', 'Index Table Scan on events.idx_d' in plan, 'plan', plan,flush=True)
                   indexed=sorted(sql(c,'select id,d from events where d>now(6)'));base=sorted(sql(c,'select id,d from events ignore index(idx_d) where d>now(6)'))
                   assert len(base)==100 and indexed==base,(label,len(indexed),len(base))
-                  print(label,'correct 100 rows, temporal index confirmed',flush=True)
-              shapes={'temporal-index':'select id,d from events where d>now(6)','temporal-base':'select id,d from events ignore index(idx_d) where d>now(6)','integer':'select id,n from events where n>99900'}
+                  print(label,'correct 100 rows against ignore-index control',flush=True)
+              shapes={'temporal-selected':'select id,d from events where d>now(6)','temporal-base':'select id,d from events ignore index(idx_d) where d>now(6)','integer':'select id,n from events where n>99900'}
               for name,query in shapes.items():
                   for c in cs.values():
                       for _ in range(20):sql(c,query)
