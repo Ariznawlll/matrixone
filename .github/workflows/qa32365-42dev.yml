@@ -59,11 +59,12 @@ jobs:
           def conn():return pymysql.connect(**address)
           admin=conn();stop=threading.Event();worker_errors=[];worker_counts=[0]*4
           sql='select statement_id,request_at,duration,status,aggr_count from system.statement_info where request_at >= date_sub(now(),interval 5 minute) and request_at < now() order by request_at desc,statement_id desc limit 100'
-          def sample(n):
-           c=conn();times=[];errs=[];nonempty=0
+          def sample(n,duration=0):
+           c=conn();times=[];errs=[];nonempty=0;started=time.monotonic()
            try:
             with c.cursor() as q:
              for i in range(n):
+              if duration and time.monotonic()-started>=duration:break
               start=time.monotonic()
               try:
                q.execute(sql);rows=q.fetchall();d=time.monotonic()-start;times.append(d);nonempty+=bool(rows)
@@ -89,7 +90,7 @@ jobs:
             if low[2]:break
             if time.monotonic()>deadline:raise RuntimeError('statement_info did not receive observations')
             time.sleep(2)
-           before=sample(30);print('low load',end=' ');ok=summary('baseline',before)
+           before=sample(100000,15);print('low load',end=' ');ok=summary('baseline',before)
            def worker(i):
             c=conn()
             try:
@@ -102,7 +103,7 @@ jobs:
            for t in threads:t.start()
            time.sleep(2)
            try:
-            loaded=sample(60);print('concurrent load',end=' ');ok=summary('loaded',loaded) and ok
+            loaded=sample(100000,90);print('concurrent load',end=' ');ok=summary('loaded',loaded) and ok
            finally:
             stop.set()
             for t in threads:t.join(timeout=60)
