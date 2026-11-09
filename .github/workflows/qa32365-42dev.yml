@@ -1,7 +1,7 @@
-name: QA 32365 exact 4.2-dev
+name: QA 32219 single-node statement info load
 on:
   push:
-    branches: [codex/qa32365-42dev-a860d63]
+    branches: [codex/qa32219-load-a860d63]
 permissions:
   contents: read
 jobs:
@@ -46,79 +46,76 @@ jobs:
               except (OSError,pymysql.MySQLError):time.sleep(2)
           else:raise RuntimeError('MO startup timed out')
           PYWAIT
-      - name: Run exact MOTR scenario three times
+      - name: Measure recent statement info under explicit local load
         env:
           MO_HOST: 127.0.0.1
           MO_PORT: '6001'
           MO_USER: dump
           MO_PASSWORD: '111'
         run: |
-          cat > /tmp/qa32365.py <<'PYCASE'
-          #!/usr/bin/env python3
-          # @target-branch: 4.2-dev
-          """#32365: composite primary-key OR points retain selective prepared scans."""
-          import os
-          import re
-          import uuid
-          import pymysql
-          
-          name = 'qa32365_' + uuid.uuid4().hex[:12]
-          conn = pymysql.connect(host=os.environ['MO_HOST'], port=int(os.environ['MO_PORT']),
-                                 user=os.environ['MO_USER'], password=os.environ['MO_PASSWORD'],
-                                 autocommit=True, connect_timeout=10, read_timeout=120)
-          created = False
+          cat > /tmp/qa32219.py <<'PYCASE'
+          import os,pymysql,time,threading,statistics
+          address=dict(host=os.environ['MO_HOST'],port=int(os.environ['MO_PORT']),user=os.environ['MO_USER'],password=os.environ['MO_PASSWORD'],autocommit=True,connect_timeout=5,read_timeout=30)
+          def conn():return pymysql.connect(**address)
+          admin=conn();stop=threading.Event();worker_errors=[];worker_counts=[0]*4
+          sql='select statement_id,request_at,duration,status,aggr_count from system.statement_info where request_at >= date_sub(now(),interval 5 minute) and request_at < now() order by request_at desc,statement_id desc limit 100'
+          def sample(n):
+           c=conn();times=[];errs=[];nonempty=0
+           try:
+            with c.cursor() as q:
+             for i in range(n):
+              start=time.monotonic()
+              try:
+               q.execute(sql);rows=q.fetchall();d=time.monotonic()-start;times.append(d);nonempty+=bool(rows)
+               if any(rows[j][1]<rows[j+1][1] for j in range(len(rows)-1)):raise AssertionError('request_at order wrong')
+              except (pymysql.MySQLError,OSError) as e:errs.append((i,type(e).__name__,str(e)[:120]));break
+           finally:c.close()
+           return times,errs,nonempty
+          def summary(name,res):
+           ts,errs,nonempty=res
+           if ts:
+            ordered=sorted(ts);p95=ordered[min(len(ordered)-1,int(.95*len(ordered)))];print(name,'samples',len(ts),'nonempty',nonempty,'p50_ms',round(statistics.median(ts)*1000,2),'p95_ms',round(p95*1000,2),'max_ms',round(max(ts)*1000,2),'errors',len(errs),flush=True)
+           else:print(name,'samples 0 errors',repr(errs),flush=True)
+           return bool(ts) and not errs
           try:
-              with conn.cursor() as cur:
-                  def sql(query):
-                      cur.execute(query)
-                      return cur.fetchall() if cur.description else ()
-          
-                  sql('create database `' + name + '`')
-                  created = True
-                  sql('use `' + name + '`')
-                  sql('create table t (tenant varchar(16) not null, session_id varchar(16) not null, '
-                      'request_id varchar(16) not null, result varchar(16), '
-                      'primary key (tenant,session_id,request_id))')
-                  sql("insert into t select 'user','session',concat('q',lpad(result,6,'0')),null "
-                      'from generate_series(0,99999) g')
-                  sql("prepare p from 'explain analyze select result from t where tenant=? and "
-                      "((session_id=? and request_id=?) or (session_id=? and request_id=?))'")
-                  sql("set @tenant='user',@s1='session',@k1='q000001',@s2='session',@k2='q000002'")
-                  for _ in range(3):
-                      plan = ' '.join(str(row[0]) for row in sql('execute p using @tenant,@s1,@k1,@s2,@k2'))
-                      match = re.search(r'Table Scan on .*?inputBlocks=\d+ inputRows=(\d+) outputRows=(\d+)', plan, re.S)
-                      if not match or match.groups() != ('2', '2'):
-                          raise AssertionError('two-point selective scan missing: ' + repr(match.groups() if match else plan))
-                  sql('deallocate prepare p')
-                  sql("prepare p from 'select request_id from t where tenant=? and "
-                      "((session_id=? and request_id=?) or (session_id=? and request_id=?)) order by request_id'")
-                  for key1, key2, expected in [('q000001','q000002',(('q000001',),('q000002',))),
-                                               ('q000003','q000004',(('q000003',),('q000004',)))]:
-                      sql("set @k1='%s',@k2='%s'" % (key1,key2))
-                      actual = sql('execute p using @tenant,@s1,@k1,@s2,@k2')
-                      if actual != expected:
-                          raise AssertionError('rebind rows: ' + repr(actual))
-                  sql('set @k1=null,@k2=null')
-                  if sql('execute p using @tenant,@s1,@k1,@s2,@k2') != ():
-                      raise AssertionError('NULL must not match')
-                  sql('deallocate prepare p')
-                  keys = ["(session_id='session' and request_id='q%06d')" % i for i in range(50)]
-                  condition = "tenant='user' and (" + ' or '.join(keys) + ')'
-                  sql('begin')
-                  cur.execute("update t set result='marked' where " + condition)
-                  if cur.rowcount != 50 or sql("select count(*) from t where result='marked'") != ((50,),):
-                      raise AssertionError('50-point update did not affect exactly 50 rows')
-                  sql('rollback')
-                  if sql("select count(*) from t where result='marked'") != ((0,),):
-                      raise AssertionError('rollback left changed rows')
-                  print('PASS: composite point prepared scans, rebind, NULL and update rollback')
+           with admin.cursor() as q:
+            q.execute('select git_version()');v=q.fetchone()[0];print('4.2-dev version',v,flush=True);assert v=='a860d63a97cdc38eee90cdbea2e5b351f716328c'
+            q.execute('create database qa32219_perf');q.execute('create table qa32219_perf.t (id int primary key,v int)')
+            q.execute('insert into qa32219_perf.t select result,mod(result,1000) from generate_series(1,500000) g')
+            for _ in range(100):q.execute('select count(*) from qa32219_perf.t where id<100');q.fetchone()
+           deadline=time.monotonic()+70
+           while True:
+            low=sample(1)
+            if low[2]:break
+            if time.monotonic()>deadline:raise RuntimeError('statement_info did not receive observations')
+            time.sleep(2)
+           before=sample(30);print('low load',end=' ');ok=summary('baseline',before)
+           def worker(i):
+            c=conn()
+            try:
+             with c.cursor() as q:
+              while not stop.is_set():
+               q.execute('select sum(v) from qa32219_perf.t where mod(id,7)=%d'%i);q.fetchone();worker_counts[i]+=1
+            except Exception as e:worker_errors.append((i,type(e).__name__,str(e)[:120]))
+            finally:c.close()
+           threads=[threading.Thread(target=worker,args=(i,)) for i in range(4)]
+           for t in threads:t.start()
+           time.sleep(2)
+           try:
+            loaded=sample(60);print('concurrent load',end=' ');ok=summary('loaded',loaded) and ok
+           finally:
+            stop.set()
+            for t in threads:t.join(timeout=60)
+           print('load worker completed',worker_counts,'worker errors',worker_errors,flush=True)
+           if any(t.is_alive() for t in threads):raise RuntimeError('load worker did not stop')
+           if not ok or worker_errors or not all(worker_counts):raise RuntimeError('query/load failed; see evidence')
           finally:
-              if created:
-                  with conn.cursor() as cur:
-                      cur.execute('drop database if exists `' + name + '`')
-              conn.close()
+           stop.set()
+           try:
+            with admin.cursor() as q:q.execute('drop database if exists qa32219_perf')
+           finally:admin.close()
           PYCASE
-          for i in 1 2 3; do /tmp/qa32365-venv/bin/python /tmp/qa32365.py; done
+          /tmp/qa32365-venv/bin/python /tmp/qa32219.py
       - name: Cleanup isolated container
         if: always()
         run: |
