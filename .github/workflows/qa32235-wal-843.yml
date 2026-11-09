@@ -1,0 +1,34 @@
+name: QA 32235 WAL failover race on official main
+on:
+  push:
+    branches: [codex/qa32235-wal-843]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact official main
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: 843929f68611f873ca63674a61ab4b2cdf5ee915
+      - name: Build native dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = 843929f68611f873ca63674a61ab4b2cdf5ee915
+          docker build --target native -t qa32235-native -f optools/images/Dockerfile .
+      - name: Run blackholed RPC, retry and cancellation contracts under race
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work qa32235-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            go test -v -race -p 2 -count=3 -run "^TestGetTruncatedLsnRetriesBlackholedEstablishedConnection$" ./pkg/logservice
+            go test -v -race -p 2 -count=3 -run "^(TestReplayForWriteRetriesTruncatedLsnWithLiveContext|TestGetTruncatedPSNStopsOnCallerCancellation)$" ./pkg/vm/engine/tae/logstore/driver/logservicedriver
+          '
