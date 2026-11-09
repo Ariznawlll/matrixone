@@ -1,7 +1,7 @@
 name: QA 32214 4.2-dev CDC retry
 on:
   push:
-    branches: [codex/qa32214-42dev-6d4dc2f]
+    branches: [codex/qa32214-42dev-a860d63]
 permissions:
   contents: read
 jobs:
@@ -13,12 +13,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: matrixorigin/matrixone
-          ref: 6d4dc2f0fb11799a871f3c72e54e943c4eb2090f
+          ref: a860d63a97cdc38eee90cdbea2e5b351f716328c
           fetch-depth: 1
           persist-credentials: false
       - name: Build matching native dependencies
         run: |
-          test "$(git rev-parse HEAD)" = 6d4dc2f0fb11799a871f3c72e54e943c4eb2090f
+          test "$(git rev-parse HEAD)" = a860d63a97cdc38eee90cdbea2e5b351f716328c
           docker build --target native -t qa32214-native -f optools/images/Dockerfile .
       - name: Run focused CDC retry normal and race tests
         run: |
