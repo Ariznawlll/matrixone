@@ -1,0 +1,38 @@
+name: QA 32214 4.2-dev CDC retry
+on:
+  push:
+    branches: [codex/qa32214-42dev-6d4dc2f]
+permissions:
+  contents: read
+jobs:
+  cdc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact 4.2-dev
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: 6d4dc2f0fb11799a871f3c72e54e943c4eb2090f
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Build matching native dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = 6d4dc2f0fb11799a871f3c72e54e943c4eb2090f
+          docker build --target native -t qa32214-native -f optools/images/Dockerfile .
+      - name: Run focused CDC retry normal and race tests
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work qa32214-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            pattern="^(TestCDCRetryErrorTransportEquivalence|TestShouldRetry|TestMysqlSinkerTransactionErrorReplaysWholeRange|TestTableChangeStreamDeadlockAutomaticallyReplaysRange|TestExecutorTransactionalFailureAndStandaloneRetry|TestTableChangeStreamCountsRowsBeforeSinkOwnershipTransfer)$"
+            go test -p 2 -v -count=3 -run "$pattern" ./pkg/cdc
+            go test -race -p 2 -v -count=3 -run "$pattern" ./pkg/cdc
+            go test -p 2 -v -count=3 -run "^(TestDefaultClassifier|TestPolicy_Do_RetryAndSucceed|TestPolicy_Do_NonRetryableStopsImmediately)$" ./pkg/cdc/retry
+          '
