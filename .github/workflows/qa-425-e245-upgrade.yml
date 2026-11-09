@@ -7,7 +7,7 @@ permissions:
 jobs:
   upgrade:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - name: Checkout exact official main
         uses: actions/checkout@v4
@@ -63,9 +63,12 @@ jobs:
               q.execute("insert into qa_upgrade_data.t values (1,12.50,'first'),(2,-9.25,'second')")
               q.execute("create account qa_upgrade_a admin_name 'admin' identified by '111'")
               q.execute("create account qa_upgrade_b admin_name 'admin' identified by '111'")
+              for i in range(129):
+                  q.execute("create account qa_upgrade_%03d admin_name 'admin' identified by '111'" % i)
+                  if i%25==24:print('release tenant fixtures created',i+1,flush=True)
               q.execute('select name,state from mo_debug.trace_features order by name');trace=q.fetchall();print('historical trace feature rows',len(trace))
           c.close()
-          for name in ('qa_upgrade_a','qa_upgrade_b'):
+          for name in ('qa_upgrade_a','qa_upgrade_b') + tuple('qa_upgrade_%03d'%i for i in range(129)):
               t=conn(name+':admin')
               with t.cursor() as q:
                   q.execute('create database qa_upgrade_tenant')
@@ -73,7 +76,7 @@ jobs:
                   q.execute("insert into qa_upgrade_tenant.t values(1,'retained'),(2,'tenant')")
               t.close()
           with open(os.environ['RUNNER_TEMP']+'/qa-up/trace.json','w') as f:json.dump(trace,f)
-          print('release fixture created: system and two tenants')
+          print('release fixture created: system and 131 tenants')
           PYOLD
       - name: Preflight real released catalog
         run: |
@@ -121,13 +124,13 @@ jobs:
               q.execute("select count(*) from information_schema.tables where table_schema='qa_upgrade_data' and table_name='t'");assert q.fetchone()==(1,)
               print('system table data, metadata and historical trace rows retained',len(got))
           c.close()
-          for name in ('qa_upgrade_a','qa_upgrade_b'):
+          for name in ('qa_upgrade_a','qa_upgrade_b') + tuple('qa_upgrade_%03d'%i for i in range(129)):
               t=conn(name+':admin')
               with t.cursor() as q:
                   q.execute('select id,v from qa_upgrade_tenant.t order by id');rows=q.fetchall();assert rows==((1,'retained'),(2,'tenant')),rows
                   q.execute("select count(*) from information_schema.partitions where table_schema='qa_upgrade_tenant' and table_name='t'");assert q.fetchone()==(1,)
               t.close()
-          print('both tenant rows and partitions metadata retained')
+          print('all 131 tenant rows and partitions metadata retained')
           PYCHECK
           "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
           docker kill --signal=INT qa-up-main >/dev/null
