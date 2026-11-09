@@ -1,0 +1,100 @@
+name: QA 31927 clean release upgrade
+on:
+  push:
+    branches: [codex/qa31927-upgrade-c99234d]
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out pinned official main
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: c99234dcf4c94d1ff9d372917cd35041f1a3a682
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Build native dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = c99234dcf4c94d1ff9d372917cd35041f1a3a682
+          docker build --target native -t qa31927-native -f optools/images/Dockerfile .
+      - name: Build pinned main service
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work qa31927-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            make build-with-prebuilt-native LAST_COMMIT_ID=c99234dcf4c94d1ff9d372917cd35041f1a3a682 BRANCH_NAME=main
+            go version -m mo-service | grep -E "vcs.revision|vcs.modified"
+          '
+      - name: Start clean 4.2.5 release with dedicated persistent directory
+        run: |
+          python3 -m pip install --user pymysql
+          mkdir -p "$RUNNER_TEMP/qa31927-data"
+          docker run -d --name qa31927-old -p 127.0.0.1:16001:6001 -v "$RUNNER_TEMP/qa31927-data:/mo-data" matrixorigin/matrixone:4.2.5
+          python3 - <<'PYOLD'
+          import time,pymysql
+          for _ in range(180):
+              try:
+                  c=pymysql.connect(host='127.0.0.1',port=16001,user='dump',password='111',connect_timeout=2,autocommit=True);break
+              except (OSError,pymysql.MySQLError):time.sleep(2)
+          else:raise RuntimeError('release did not become ready')
+          with c.cursor() as q:
+              q.execute('select version(),git_version()');version=q.fetchone();print('old release version/git:',version)
+              assert '4.2.5' in version[0],version
+              q.execute('create database qa31927_upgrade')
+              q.execute('create table qa31927_upgrade.ordinary(id int primary key, v int)')
+              q.execute('insert into qa31927_upgrade.ordinary values(1,10),(2,20)')
+              q.execute("create account qa31927tenant admin_name 'admin' identified by '111'")
+              q.execute("select count(*) from information_schema.partitions where table_schema='qa31927_upgrade' and table_name='ordinary'")
+              print('old ordinary PARTITIONS count:',q.fetchone()[0])
+          c.close()
+          c=pymysql.connect(host='127.0.0.1',port=16001,user='qa31927tenant:admin',password='111',autocommit=True)
+          with c.cursor() as q:
+              q.execute('create database qa31927_tenantdb')
+              q.execute('create table qa31927_tenantdb.ordinary(id int primary key, v int)')
+              q.execute('insert into qa31927_tenantdb.ordinary values(1,10),(2,20)')
+              q.execute("select count(*) from information_schema.partitions where table_schema='qa31927_tenantdb' and table_name='ordinary'")
+              print('old tenant ordinary PARTITIONS count:',q.fetchone()[0])
+          c.close()
+          PYOLD
+      - name: Gracefully stop release and start current main on the same data
+        run: |
+          docker stop --time 60 qa31927-old
+          docker rm qa31927-old
+          docker run -d --name qa31927-main -p 127.0.0.1:16001:6001 -v "$GITHUB_WORKSPACE:/work" -v "$RUNNER_TEMP/qa31927-data:/work/mo-data" -w /work -e LD_LIBRARY_PATH=/work/cgo:/work/thirdparties/install/lib --entrypoint /work/mo-service qa31927-native -launch etc/quickstart/launch.toml -debug-http=:12345
+      - name: Check first accessible SQL for both accounts
+        run: |
+          python3 - <<'PYNEW'
+          import time,pymysql
+          def first(user,db):
+              for _ in range(180):
+                  try:
+                      c=pymysql.connect(host='127.0.0.1',port=16001,user=user,password='111',connect_timeout=2,autocommit=True)
+                      break
+                  except (OSError,pymysql.MySQLError):time.sleep(2)
+              else:raise RuntimeError('main SQL did not become ready')
+              with c.cursor() as q:
+                  q.execute("select git_version(), (select count(*) from information_schema.partitions where table_schema='%s' and table_name='ordinary')"%db)
+                  row=q.fetchone();print('first accessible SQL',user.split(':')[-1],row)
+                  assert row==('c99234dcf4c94d1ff9d372917cd35041f1a3a682',1),row
+                  q.execute('select id,v from '+db+'.ordinary order by id');rows=q.fetchall();print('preserved rows',rows)
+                  assert rows==((1,10),(2,20)),rows
+              c.close()
+          first('dump','qa31927_upgrade')
+          first('qa31927tenant:admin','qa31927_tenantdb')
+          print('PASS clean release stop-upgrade first SQL')
+          PYNEW
+      - name: Diagnostics and cleanup owned containers
+        if: always()
+        run: |
+          for n in qa31927-old qa31927-main; do
+            if docker inspect "$n" >/dev/null 2>&1; then docker logs --tail 80 "$n" || true; docker rm -f "$n" || true; fi
+          done
