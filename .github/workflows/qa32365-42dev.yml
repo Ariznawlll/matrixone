@@ -1,0 +1,126 @@
+name: QA 32365 exact 4.2-dev
+on:
+  push:
+    branches: [codex/qa32365-42dev-a860d63]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact official 4.2-dev
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: a860d63a97cdc38eee90cdbea2e5b351f716328c
+          fetch-depth: 1
+      - name: Compile exact source and native dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = a860d63a97cdc38eee90cdbea2e5b351f716328c
+          docker build --target native -t qa32365-native -f optools/images/Dockerfile .
+          docker run --rm -v "$PWD:/work" -w /work qa32365-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            go build -p 2 -ldflags "-X github.com/matrixorigin/matrixone/pkg/version.CommitID=a860d63a97cdc38eee90cdbea2e5b351f716328c" -o mo-service ./cmd/mo-service
+          '
+      - name: Start isolated MO
+        run: |
+          docker run -d --name qa32365-mo --network host -v "$PWD:/work" -w /work -e LD_LIBRARY_PATH=/work/cgo:/work/thirdparties/install/lib qa32365-native ./mo-service -launch etc/launch/launch.toml
+          python3 -m venv /tmp/qa32365-venv
+          /tmp/qa32365-venv/bin/pip -q install pymysql
+          /tmp/qa32365-venv/bin/python - <<'PYWAIT'
+          import pymysql,time
+          for _ in range(180):
+              try:
+                  c=pymysql.connect(host='127.0.0.1',port=6001,user='dump',password='111',connect_timeout=2)
+                  q=c.cursor();q.execute('select git_version()');v=q.fetchone()[0];c.close()
+                  assert v=='a860d63a97cdc38eee90cdbea2e5b351f716328c',v
+                  print('official 4.2-dev git_version:',v);break
+              except (OSError,pymysql.MySQLError):time.sleep(2)
+          else:raise RuntimeError('MO startup timed out')
+          PYWAIT
+      - name: Run exact MOTR scenario three times
+        env:
+          MO_HOST: 127.0.0.1
+          MO_PORT: '6001'
+          MO_USER: dump
+          MO_PASSWORD: '111'
+        run: |
+          cat > /tmp/qa32365.py <<'PYCASE'
+          #!/usr/bin/env python3
+          # @target-branch: 4.2-dev
+          """#32365: composite primary-key OR points retain selective prepared scans."""
+          import os
+          import re
+          import uuid
+          import pymysql
+          
+          name = 'qa32365_' + uuid.uuid4().hex[:12]
+          conn = pymysql.connect(host=os.environ['MO_HOST'], port=int(os.environ['MO_PORT']),
+                                 user=os.environ['MO_USER'], password=os.environ['MO_PASSWORD'],
+                                 autocommit=True, connect_timeout=10, read_timeout=120)
+          created = False
+          try:
+              with conn.cursor() as cur:
+                  def sql(query):
+                      cur.execute(query)
+                      return cur.fetchall() if cur.description else ()
+          
+                  sql('create database `' + name + '`')
+                  created = True
+                  sql('use `' + name + '`')
+                  sql('create table t (tenant varchar(16) not null, session_id varchar(16) not null, '
+                      'request_id varchar(16) not null, result varchar(16), '
+                      'primary key (tenant,session_id,request_id))')
+                  sql("insert into t select 'user','session',concat('q',lpad(result,6,'0')),null "
+                      'from generate_series(0,99999) g')
+                  sql("prepare p from 'explain analyze select result from t where tenant=? and "
+                      "((session_id=? and request_id=?) or (session_id=? and request_id=?))'")
+                  sql("set @tenant='user',@s1='session',@k1='q000001',@s2='session',@k2='q000002'")
+                  for _ in range(3):
+                      plan = ' '.join(str(row[0]) for row in sql('execute p using @tenant,@s1,@k1,@s2,@k2'))
+                      match = re.search(r'Table Scan on .*?inputBlocks=\d+ inputRows=(\d+) outputRows=(\d+)', plan, re.S)
+                      if not match or match.groups() != ('2', '2'):
+                          raise AssertionError('two-point selective scan missing: ' + repr(match.groups() if match else plan))
+                  sql('deallocate prepare p')
+                  sql("prepare p from 'select request_id from t where tenant=? and "
+                      "((session_id=? and request_id=?) or (session_id=? and request_id=?)) order by request_id'")
+                  for key1, key2, expected in [('q000001','q000002',(('q000001',),('q000002',))),
+                                               ('q000003','q000004',(('q000003',),('q000004',)))]:
+                      sql("set @k1='%s',@k2='%s'" % (key1,key2))
+                      actual = sql('execute p using @tenant,@s1,@k1,@s2,@k2')
+                      if actual != expected:
+                          raise AssertionError('rebind rows: ' + repr(actual))
+                  sql('set @k1=null,@k2=null')
+                  if sql('execute p using @tenant,@s1,@k1,@s2,@k2') != ():
+                      raise AssertionError('NULL must not match')
+                  sql('deallocate prepare p')
+                  keys = ["(session_id='session' and request_id='q%06d')" % i for i in range(50)]
+                  condition = "tenant='user' and (" + ' or '.join(keys) + ')'
+                  sql('begin')
+                  cur.execute("update t set result='marked' where " + condition)
+                  if cur.rowcount != 50 or sql("select count(*) from t where result='marked'") != ((50,),):
+                      raise AssertionError('50-point update did not affect exactly 50 rows')
+                  sql('rollback')
+                  if sql("select count(*) from t where result='marked'") != ((0,),):
+                      raise AssertionError('rollback left changed rows')
+                  print('PASS: composite point prepared scans, rebind, NULL and update rollback')
+          finally:
+              if created:
+                  with conn.cursor() as cur:
+                      cur.execute('drop database if exists `' + name + '`')
+              conn.close()
+          PYCASE
+          for i in 1 2 3; do /tmp/qa32365-venv/bin/python /tmp/qa32365.py; done
+      - name: Cleanup isolated container
+        if: always()
+        run: |
+          docker logs --tail 80 qa32365-mo 2>/dev/null || true
+          docker rm -f qa32365-mo 2>/dev/null || true
