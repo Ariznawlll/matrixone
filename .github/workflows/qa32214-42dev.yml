@@ -19,7 +19,7 @@ jobs:
       - name: Build matching native dependencies
         run: |
           test "$(git rev-parse HEAD)" = a860d63a97cdc38eee90cdbea2e5b351f716328c
-          sed -i 's#https://github.com/matrixorigin/thirdparty/raw/#https://raw.githubusercontent.com/matrixorigin/thirdparty/#' thirdparties/Makefile
+          sed -i 's#https://github.com/matrixorigin/thirdparty/raw/#https://media.githubusercontent.com/media/matrixorigin/thirdparty/#' thirdparties/Makefile
           docker build --target native -t qa32214-native -f optools/images/Dockerfile .
       - name: Run real embedded MO transaction rollback and replay
         run: |
