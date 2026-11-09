@@ -1,0 +1,126 @@
+name: QA 30524 real Docker on isolated Linux
+on:
+  push:
+    branches: [codex/qa30524-real-docker-c99234d]
+permissions:
+  contents: read
+jobs:
+  real-docker-single-node:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out pinned official main
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: c99234dcf4c94d1ff9d372917cd35041f1a3a682
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify source and build native dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = c99234dcf4c94d1ff9d372917cd35041f1a3a682
+          docker build --target native -t qa30524-native -f optools/images/Dockerfile .
+      - name: Build MatrixOne from pinned main
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work qa30524-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            make build-with-prebuilt-native LAST_COMMIT_ID=c99234dcf4c94d1ff9d372917cd35041f1a3a682 BRANCH_NAME=main
+            go version -m mo-service | grep -E "vcs.revision|vcs.modified"
+          '
+      - name: Install actual OCF resource-agent library
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq resource-agents
+          test -r /usr/lib/ocf/lib/heartbeat/ocf-shellfuncs
+          docker compose version
+          python3 -m pip install --user pymysql
+      - name: Start real MO in an isolated Compose project
+        run: |
+          if docker inspect matrixone >/dev/null 2>&1; then
+            echo 'Container name already exists; aborting without touching it.'
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/qa30524-project"
+          printf '#!/bin/sh\nexec docker compose "$@"\n' > "$RUNNER_TEMP/qa30524-compose"
+          chmod 700 "$RUNNER_TEMP/qa30524-compose"
+          cat > "$RUNNER_TEMP/qa30524-project/docker-compose.yaml" <<EOF
+          services:
+            matrixone:
+              image: qa30524-native
+              container_name: matrixone
+              working_dir: /work
+              volumes:
+                - "$GITHUB_WORKSPACE:/work"
+              environment:
+                LD_LIBRARY_PATH: /work/cgo:/work/thirdparties/install/lib
+              entrypoint: ["/work/mo-service"]
+              command: ["-launch", "etc/quickstart/launch.toml", "-debug-http=:12345"]
+              ports:
+                - "127.0.0.1:16001:6001"
+          EOF
+          touch "$RUNNER_TEMP/qa30524-owned"
+          docker compose -f "$RUNNER_TEMP/qa30524-project/docker-compose.yaml" up -d
+          python3 - <<'PY'
+          import time,pymysql
+          for _ in range(120):
+              try:
+                  c=pymysql.connect(host='127.0.0.1',port=16001,user='dump',password='111',connect_timeout=2)
+                  with c.cursor() as q:
+                      q.execute('select git_version(),42')
+                      version,answer=q.fetchone()
+                  print('MO git_version:',version,'SQL control:',answer)
+                  assert version=='c99234dcf4c94d1ff9d372917cd35041f1a3a682' and answer==42
+                  c.close();break
+              except (OSError,pymysql.MySQLError):time.sleep(2)
+          else:raise RuntimeError('MO did not become ready')
+          PY
+      - name: Verify OCF monitor and stop with real Docker
+        run: |
+          python3 - <<'PY'
+          import os,pathlib,subprocess,sys
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])
+          project=root/'qa30524-project'; yml=project/'docker-compose.yaml'
+          agent=pathlib.Path(os.environ['GITHUB_WORKSPACE'])/'docs/mo-ha-deploy/agents/heartbeat/docker-compose'
+          env=dict(os.environ,OCF_ROOT='/usr/lib/ocf',OCF_RESOURCE_INSTANCE='qa30524',
+                   OCF_RESKEY_binpath=str(root/'qa30524-compose'),OCF_RESKEY_dirpath=str(project),
+                   OCF_RESKEY_ymlfile=yml.name)
+          def run(args,environment=env):
+              return subprocess.run(args,env=environment,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+          control=run(['/bin/sh',str(agent),'monitor'])
+          print('healthy actual Docker monitor rc:',control.returncode)
+          if control.returncode!=0:
+              print('control failed:',control.stderr[-1000:]);sys.exit(2)
+          badenv=dict(env,DOCKER_HOST='unix:///tmp/qa30524-nonexistent-docker.sock')
+          raw=run([str(root/'qa30524-compose'),'-f',str(yml),'ps','-q'],badenv)
+          monitor=run(['/bin/sh',str(agent),'monitor'],badenv)
+          print('unreachable Docker: compose rc:',raw.returncode,'agent monitor rc:',monitor.returncode)
+          if raw.returncode==0:
+              print('invalid fault injection: compose unexpectedly succeeded');sys.exit(2)
+          backup=project/'saved-compose.yaml';yml.rename(backup)
+          try:
+              stopped=run(['/bin/sh',str(agent),'stop'])
+              inspect=run(['docker','inspect','--format={{.State.Running}}','matrixone'])
+              running=inspect.returncode==0 and inspect.stdout.strip()=='true'
+              print('missing YAML: agent stop rc:',stopped.returncode,'actual MO still running:',running)
+          finally:
+              backup.rename(yml)
+          if monitor.returncode==7 or (stopped.returncode==0 and running):
+              print('CONFIRMED: real Docker reproduces unsafe error classification or stop acknowledgement')
+              sys.exit(1)
+          if monitor.returncode==0 or stopped.returncode==0:
+              print('unexpected result; inspect logs');sys.exit(2)
+          print('Both negative paths behaved as expected')
+          PY
+      - name: Clean up only the container created by this job
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/qa30524-owned" ]; then
+            docker rm -f matrixone || true
+          fi
