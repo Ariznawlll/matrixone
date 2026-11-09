@@ -105,7 +105,7 @@ jobs:
           echo "released process exit code=$code"
           test "$code" = 0
           docker rm qa-up-old >/dev/null
-          cp -a "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/old-backup"
+          sudo cp -a "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/old-backup"
           echo "quiescent release data backup saved"
           docker run -d --name qa-up-main --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
       - name: Validate main upgrade and restart
@@ -146,7 +146,7 @@ jobs:
           test "$(timeout 150 docker wait qa-up-main)" = 0
           docker rm qa-up-main >/dev/null
           mv "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/root/mo-data-first-upgrade"
-          cp -a "$RUNNER_TEMP/qa-up/old-backup" "$RUNNER_TEMP/qa-up/root/mo-data"
+          sudo cp -a "$RUNNER_TEMP/qa-up/old-backup" "$RUNNER_TEMP/qa-up/root/mo-data"
           echo 'restored quiescent 4.2.5 data backup'
           docker run -d --name qa-up-interrupt --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
           found=0
