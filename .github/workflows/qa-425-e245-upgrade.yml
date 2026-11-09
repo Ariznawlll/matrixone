@@ -1,4 +1,4 @@
-name: QA 32298 32297 32288 stopped release upgrade
+name: QA 32298 32297 32288 stopped release upgrade 843929f
 on:
   push:
     branches: [codex/qa-upgrade-425-e245]
@@ -13,11 +13,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: matrixorigin/matrixone
-          ref: e2459cc55f4b514893e19732743460bc5f16d552
+          ref: 843929f68611f873ca63674a61ab4b2cdf5ee915
           fetch-depth: 1
       - name: Build exact main and native dependencies
         run: |
-          test "$(git rev-parse HEAD)" = e2459cc55f4b514893e19732743460bc5f16d552
+          test "$(git rev-parse HEAD)" = 843929f68611f873ca63674a61ab4b2cdf5ee915
           docker build --target native -t qa-upgrade-native -f optools/images/Dockerfile .
           docker run --rm -v "$PWD:/work" -w /work qa-upgrade-native bash -euc '
             git config --global --add safe.directory /work
@@ -28,7 +28,7 @@ jobs:
             export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
             export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
             export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
-            go build -p 2 -ldflags "-X github.com/matrixorigin/matrixone/pkg/version.CommitID=e2459cc55f4b514893e19732743460bc5f16d552" -o mo-service ./cmd/mo-service
+            go build -p 2 -ldflags "-X github.com/matrixorigin/matrixone/pkg/version.CommitID=843929f68611f873ca63674a61ab4b2cdf5ee915" -o mo-service ./cmd/mo-service
           '
       - name: Prepare official release and isolated data root
         run: |
@@ -117,7 +117,7 @@ jobs:
               except (OSError,pymysql.MySQLError):time.sleep(2)
           else:raise RuntimeError('main did not become SQL ready')
           with c.cursor() as q:
-              q.execute('select git_version()');v=q.fetchone()[0];print('main version',v);assert v=='e2459cc55f4b514893e19732743460bc5f16d552',v
+              q.execute('select git_version()');v=q.fetchone()[0];print('main version',v);assert v=='843929f68611f873ca63674a61ab4b2cdf5ee915',v
               q.execute('select id,cast(d as char),s from qa_upgrade_data.t order by id');rows=q.fetchall();assert rows==((1,'12.50','first'),(2,'-9.25','second')),rows
               q.execute('select name,state from mo_debug.trace_features order by name');got=q.fetchall()
               expected=json.load(open(os.environ['RUNNER_TEMP']+'/qa-up/trace.json'));assert [list(x) for x in got]==expected,(got,expected)
