@@ -105,6 +105,8 @@ jobs:
           echo "released process exit code=$code"
           test "$code" = 0
           docker rm qa-up-old >/dev/null
+          cp -a "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/old-backup"
+          echo "quiescent release data backup saved"
           docker run -d --name qa-up-main --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
       - name: Validate main upgrade and restart
         run: |
@@ -137,9 +139,34 @@ jobs:
           code=$(timeout 150 docker wait qa-up-main); echo "first main exit code=$code"; test "$code" = 0
           docker start qa-up-main >/dev/null
           "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
+      - name: Restore old backup and interrupt a tenant upgrade
+        run: |
+          set -euo pipefail
+          docker kill --signal=INT qa-up-main >/dev/null
+          test "$(timeout 150 docker wait qa-up-main)" = 0
+          docker rm qa-up-main >/dev/null
+          mv "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/root/mo-data-first-upgrade"
+          cp -a "$RUNNER_TEMP/qa-up/old-backup" "$RUNNER_TEMP/qa-up/root/mo-data"
+          echo 'restored quiescent 4.2.5 data backup'
+          docker run -d --name qa-up-interrupt --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
+          found=0
+          for i in $(seq 1 1500); do
+            docker logs qa-up-interrupt > "$RUNNER_TEMP/qa-up/interrupt.log" 2>&1
+            if grep -q 'execute upgrade tenant' "$RUNNER_TEMP/qa-up/interrupt.log"; then
+              found=1
+              echo "tenant-upgrade marker observed; completed markers=$(grep -c 'execute upgrade tenant completed' "$RUNNER_TEMP/qa-up/interrupt.log" || true)"
+              docker kill --signal=KILL qa-up-interrupt >/dev/null
+              break
+            fi
+            sleep 0.2
+          done
+          test "$found" = 1
+          docker start qa-up-interrupt >/dev/null
+          "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
+          echo 'restored backup and interrupted tenant migration recovered successfully'
       - name: Collect diagnostics and clean up
         if: always()
         run: |
-          for name in qa-up-old qa-up-main; do
+          for name in qa-up-old qa-up-main qa-up-interrupt; do
             if docker inspect "$name" >/dev/null 2>&1; then docker logs --tail 70 "$name" || true; docker rm -f "$name" || true; fi
           done
