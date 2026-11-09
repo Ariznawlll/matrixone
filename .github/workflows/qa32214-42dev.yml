@@ -20,7 +20,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = a860d63a97cdc38eee90cdbea2e5b351f716328c
           docker build --target native -t qa32214-native -f optools/images/Dockerfile .
-      - name: Run focused CDC retry normal and race tests
+      - name: Run real embedded MO transaction rollback and replay
         run: |
           docker run --rm -v "$PWD:/work" -w /work qa32214-native bash -euc '
             git config --global --add safe.directory /work
@@ -31,8 +31,5 @@ jobs:
             export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
             export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
             export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
-            pattern="^(TestCDCRetryErrorTransportEquivalence|TestShouldRetry|TestMysqlSinkerTransactionErrorReplaysWholeRange|TestTableChangeStreamDeadlockAutomaticallyReplaysRange|TestExecutorTransactionalFailureAndStandaloneRetry|TestTableChangeStreamCountsRowsBeforeSinkOwnershipTransfer)$"
-            go test -p 2 -v -count=3 -run "$pattern" ./pkg/cdc
-            go test -race -p 2 -v -count=3 -run "$pattern" ./pkg/cdc
-            go test -p 2 -v -count=3 -run "^(TestDefaultClassifier|TestPolicy_Do_RetryAndSucceed|TestPolicy_Do_NonRetryableStopsImmediately)$" ./pkg/cdc/retry
+            go test -p 2 -v -count=3 -run "^TestCDCTransactionAbortReplaysAllRowsOnMO$" ./pkg/embed
           '
