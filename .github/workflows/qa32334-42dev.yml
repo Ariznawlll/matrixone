@@ -1,0 +1,97 @@
+name: QA 32334 4.2-dev profile toggle
+on:
+  push:
+    branches: [codex/qa32334-42dev-6d4dc2f]
+permissions:
+  contents: read
+jobs:
+  profile-toggle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact 4.2-dev
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: 6d4dc2f0fb11799a871f3c72e54e943c4eb2090f
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Build matching native dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = 6d4dc2f0fb11799a871f3c72e54e943c4eb2090f
+          docker build --target native -t qa32334-native -f optools/images/Dockerfile .
+      - name: Add isolated diagnostic probe
+        run: |
+          cat > pkg/common/mpool/qa32334_diagnostic_test.go <<'GO'
+          package mpool
+          import (
+              "testing"
+              "unsafe"
+              "github.com/stretchr/testify/require"
+          )
+          func TestQA32334OffControl(t *testing.T) {
+              original := ProfilingEnabled()
+              t.Cleanup(func(){ if original { EnableProfiling() } else { DisableProfiling() } })
+              DisableProfiling()
+              before := ProfileTrackedCount()
+              pool := MustNew("qa32334-control")
+              data, err := pool.Alloc(4096, true)
+              require.NoError(t,err)
+              pool.Free(data)
+              require.Zero(t,pool.CurrNB())
+              require.Equal(t,before,ProfileTrackedCount())
+              DeleteMPool(pool)
+          }
+          func TestQA32334EnabledFreeControl(t *testing.T) {
+              original := ProfilingEnabled()
+              t.Cleanup(func(){ if original { EnableProfiling() } else { DisableProfiling() } })
+              EnableProfiling()
+              before := ProfileTrackedCount()
+              pool := MustNew("qa32334-enabled-control")
+              data,err := pool.Alloc(4096,true)
+              require.NoError(t,err)
+              require.Equal(t,before+1,ProfileTrackedCount())
+              pool.Free(data)
+              require.Zero(t,pool.CurrNB())
+              require.Equal(t,before,ProfileTrackedCount())
+              DeleteMPool(pool)
+          }
+          func TestQA32334ToggleFree(t *testing.T) {
+              original := ProfilingEnabled()
+              before := ProfileTrackedCount()
+              pool := MustNew("qa32334-toggle")
+              var data []byte
+              var key uintptr
+              t.Cleanup(func(){
+                  EnableProfiling()
+                  if data != nil { pool.Free(data) }
+                  if key != 0 { profileRecordFree(key,4096) }
+                  if !original { DisableProfiling() }
+                  DeleteMPool(pool)
+              })
+              EnableProfiling()
+              var err error
+              data,err=pool.Alloc(4096,true)
+              require.NoError(t,err)
+              key=uintptr(unsafe.Pointer(unsafe.SliceData(data)))
+              require.Equal(t,before+1,ProfileTrackedCount())
+              DisableProfiling()
+              pool.Free(data);data=nil
+              require.Zero(t,pool.CurrNB())
+              t.Logf("pool bytes=0, tracked before=%d after=%d",before,ProfileTrackedCount())
+              require.Equal(t,before,ProfileTrackedCount())
+          }
+          GO
+      - name: Run 4.2-dev reproduction and controls three times
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work qa32334-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            go test -p 2 -v -count=3 -run "^TestQA32334" ./pkg/common/mpool
+          '
