@@ -1,0 +1,116 @@
+name: QA 32318 temporal index before after
+on:
+  push:
+    branches: [codex/qa32318-perf-e245]
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout immediate pre-refactor main
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: b19ef50f05ab0e398b65b4cf3f745470f803df09
+          path: before
+      - name: Checkout exact current main
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: e2459cc55f4b514893e19732743460bc5f16d552
+          path: after
+      - name: Build paired binaries with matched native dependencies
+        run: |
+          set -euo pipefail
+          test "$(git -C before rev-parse HEAD)" = b19ef50f05ab0e398b65b4cf3f745470f803df09
+          test "$(git -C after rev-parse HEAD)" = e2459cc55f4b514893e19732743460bc5f16d552
+          docker build --target native -t qa32318-native -f after/optools/images/Dockerfile after
+          docker run --rm -v "$PWD:/src" -w /src qa32318-native bash -euc '
+            git config --global --add safe.directory /src/before
+            git config --global --add safe.directory /src/after
+            src=/go/src/github.com/matrixorigin/matrixone
+            for side in before after; do
+              cp -a "$src/thirdparties/install" "$side/thirdparties/"
+              cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" "$side/cgo/"
+              export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+              export CGO_CFLAGS="-I/src/$side/cgo -I/src/$side/thirdparties/install/include"
+              export CGO_LDFLAGS="-L/src/$side/cgo -lmo -L/src/$side/thirdparties/install/lib -Wl,-rpath,/src/$side/cgo -Wl,-rpath,/src/$side/thirdparties/install/lib"
+              export LD_LIBRARY_PATH="/src/$side/cgo:/src/$side/thirdparties/install/lib"
+              sha=$(git -C "$side" rev-parse HEAD)
+              (cd "$side" && go build -p 2 -ldflags "-X github.com/matrixorigin/matrixone/pkg/version.CommitID=$sha" -o mo-service ./cmd/mo-service)
+            done
+          '
+      - name: Prepare two isolated server configs
+        run: |
+          python3 - <<'PYCONFIG'
+          from pathlib import Path
+          for side,sql,rpc,tn,log,status in [('before',16001,28000,29000,33000,17000),('after',16002,28100,29100,33100,17100)]:
+              p=Path(side)/'etc/launch'
+              for f in p.glob('*.toml'):
+                  s=f.read_text().replace('port-base = 18000',f'port-base = {rpc}').replace('port-base = 19000',f'port-base = {tn}')
+                  if f.name=='cn.toml':s=s.replace('status-port = 7001',f'status-port = {status+1}')+'\n[cn.frontend]\nport = '+str(sql)+'\n'
+                  if f.name=='tn.toml':s=s.replace('status-port = 7001',f'status-port = {status+2}')+'\n[hakeeper-client]\nservice-addresses = ["127.0.0.1:'+str(log+1)+'"]\n'
+                  if f.name=='cn.toml':s+='\n[hakeeper-client]\nservice-addresses = ["127.0.0.1:'+str(log+1)+'"]\n'
+                  if f.name=='log.toml':s=s.replace('status-port = 7001',f'status-port = {status+3}')+'\n[logservice]\nraft-port = '+str(log)+'\nlogservice-port = '+str(log+1)+'\ngossip-port = '+str(log+2)+'\ngossip-seed-addresses = ["127.0.0.1:'+str(log+2)+'"]\n\n[hakeeper-client]\nservice-addresses = ["127.0.0.1:'+str(log+1)+'"]\n'
+                  f.write_text(s)
+          PYCONFIG
+          python3 -m venv "$RUNNER_TEMP/qa32318-venv"
+          "$RUNNER_TEMP/qa32318-venv/bin/pip" -q install pymysql
+      - name: Start paired standalone servers
+        run: |
+          docker run -d --name qa32318-before --network host -v "$PWD:/src" -w /src/before -e LD_LIBRARY_PATH=/src/before/cgo:/src/before/thirdparties/install/lib --entrypoint /src/before/mo-service qa32318-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16101
+          docker run -d --name qa32318-after --network host -v "$PWD:/src" -w /src/after -e LD_LIBRARY_PATH=/src/after/cgo:/src/after/thirdparties/install/lib --entrypoint /src/after/mo-service qa32318-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16102
+      - name: Measure equal data, alternating old and new
+        run: |
+          "$RUNNER_TEMP/qa32318-venv/bin/python" - <<'PYPERF'
+          import pymysql,time,statistics
+          def connect(port,sha):
+              for _ in range(180):
+                  try:
+                      c=pymysql.connect(host='127.0.0.1',port=port,user='dump',password='111',autocommit=True,connect_timeout=2,read_timeout=120)
+                      with c.cursor() as q:q.execute('select git_version()');v=q.fetchone()[0]
+                      assert v==sha,(port,v);return c
+                  except (OSError,pymysql.MySQLError):time.sleep(2)
+              raise RuntimeError('server not ready '+str(port))
+          cs={'before':connect(16001,'b19ef50f05ab0e398b65b4cf3f745470f803df09'),'after':connect(16002,'e2459cc55f4b514893e19732743460bc5f16d552')}
+          def sql(c,s):
+              with c.cursor() as q:q.execute(s);return q.fetchall() if q.description else ()
+          try:
+              for label,c in cs.items():
+                  sql(c,'create database qa32318_perf');sql(c,'use qa32318_perf');sql(c,"set time_zone='+00:00'");sql(c,'set timestamp=1777593599')
+                  sql(c,'create table events(id int primary key,d datetime(6),n bigint,key idx_d(d),key idx_n(n))')
+                  sql(c,"insert into events select result,case when mod(result*8191,100001)<99901 then date_add('2020-01-01 00:00:00',interval mod(result*8191,100001) second) else date_add(now(6),interval 1 day) end,mod(result*8191,100001) from generate_series(0,100000) g")
+                  idxs=sql(c,"select index_table_name from mo_catalog.mo_indexes where name in ('idx_d','idx_n') and table_id=(select rel_id from mo_catalog.mo_tables where reldatabase='qa32318_perf' and relname='events')")
+                  sql(c,"select mo_ctl('dn','flush','qa32318_perf.events')")
+                  for (idx,) in idxs:sql(c,"select mo_ctl('dn','flush','qa32318_perf."+idx+"')")
+                  sql(c,'analyze table events(d,n) fullscan')
+                  plan=' '.join(str(r[0]) for r in sql(c,'explain analyze select id,d from events where d>now(6)'))
+                  assert 'Index Table Scan on events.idx_d' in plan,(label,plan)
+                  indexed=sorted(sql(c,'select id,d from events where d>now(6)'));base=sorted(sql(c,'select id,d from events ignore index(idx_d) where d>now(6)'))
+                  assert len(base)==100 and indexed==base,(label,len(indexed),len(base))
+                  print(label,'correct 100 rows, temporal index confirmed',flush=True)
+              shapes={'temporal-index':'select id,d from events where d>now(6)','temporal-base':'select id,d from events ignore index(idx_d) where d>now(6)','integer':'select id,n from events where n>99900'}
+              for name,query in shapes.items():
+                  for c in cs.values():
+                      for _ in range(20):sql(c,query)
+                  per={'before':[],'after':[]}
+                  for block in range(8):
+                      for label in (('before','after') if block%2==0 else ('after','before')):
+                          c=cs[label]
+                          for _ in range(100):
+                              t=time.perf_counter();sql(c,query);per[label].append((time.perf_counter()-t)*1000)
+                  for label in ('before','after'):
+                      vals=sorted(per[label]);print(name,label,'samples',len(vals),'p50_ms',round(statistics.median(vals),4),'p95_ms',round(vals[int(len(vals)*.95)],4),'max_ms',round(vals[-1],4),flush=True)
+          finally:
+              for c in cs.values():
+                  try:sql(c,'drop database if exists qa32318_perf')
+                  finally:c.close()
+          PYPERF
+      - name: Cleanup and diagnostics
+        if: always()
+        run: |
+          for name in qa32318-before qa32318-after; do
+            if docker inspect "$name" >/dev/null 2>&1; then docker logs --tail 30 "$name" || true; docker rm -f "$name" || true; fi
+          done
