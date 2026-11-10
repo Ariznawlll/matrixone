@@ -74,7 +74,7 @@ jobs:
               assert trace_tables==sorted(names),trace_tables
               print('historical trace tables',len(trace_tables))
               q.execute('use qa_upgrade_data')
-              for command in ('add-table t id','add-txn user dump','add-statement contains qa_marker'):
+              for command in ('add-table t id','add-txn user root','add-statement contains qa_marker'):
                   q.execute("select mo_ctl('cn','txn-trace',%s)",(command,));print('trace command',command,q.fetchall())
               saved={}
               for name in ('trace_table_filters','trace_txn_filters','trace_statement_filters'):
@@ -84,8 +84,11 @@ jobs:
               print('seeded trace filter data via supported txn-trace commands')
               q.execute("select mo_ctl('cn','txn-trace','enable txn')");print('trace enable',q.fetchall())
               time.sleep(15)
+              event_conn=conn('root')
               for i in range(30):
-                  q.execute('select count(*) from qa_upgrade_data.t');q.fetchall()
+                  with event_conn.cursor() as event_query:
+                      event_query.execute('select count(*) from qa_upgrade_data.t');event_query.fetchall()
+              event_conn.close()
               print('waiting for trace exporter',flush=True)
               time.sleep(45)
               q.execute("select mo_ctl('cn','txn-trace','disable txn')");q.fetchall()
