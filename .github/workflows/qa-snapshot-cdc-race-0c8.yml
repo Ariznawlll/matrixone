@@ -1,0 +1,34 @@
+name: QA 32298 32288 upgrade recovery race on official main
+on:
+  push:
+    branches: [codex/qa-snapshot-cdc-race-0c8]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact official main
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: 0c8bd5e5f3be4ce5582201513161181ddca37d6d
+      - name: Build native dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = 0c8bd5e5f3be4ce5582201513161181ddca37d6d
+          docker build --target native -t qa-upgrade-race-native -f optools/images/Dockerfile .
+      - name: Run upgrade admission, tenant recovery and cancellation contracts under race
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work qa-upgrade-race-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            pattern="^(TestCrossingLegacyCDCGateMatrix|TestRejectLegacyCDCTasks|TestLegacyCDCAdmissionBeforeUpgradeMutation|TestLegacyCDCAdmissionEmptyCatalogAdmitsSourceOnward|TestLegacyCDCReadErrorStaysRetryableAtAdmission|TestLegacyCDCAdmissionRecoveryEnforcedBeforeResumeVerdict|TestScanSnapshotDecisions|TestScanSnapshotDecisionsAcrossCatalogPagesAndRetry|TestApplySnapshotDecisionPageRechecksOwnership|TestSnapshotDecisionReader|TestSnapshotDecisionRejectsInvalidInput|TestSnapshotDecisionUsesExactPreimageAndIsMonotone)$"
+            go test -v -race -p 2 -count=3 -run "$pattern" ./pkg/bootstrap
+          '
