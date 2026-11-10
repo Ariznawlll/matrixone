@@ -1,0 +1,73 @@
+name: QA 32344 32367 4.2-dev
+on:
+  push:
+    branches: [codex/qa-32344-32367-4-2-20261110]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: bf15b1c7a82e1801fb0a34f234b77d92d6766606
+      - name: Build exact 4.2-dev
+        run: |
+          test "$(git rev-parse HEAD)" = bf15b1c7a82e1801fb0a34f234b77d92d6766606
+          docker build --target native -t qa-native-42 -f optools/images/Dockerfile .
+          docker run --rm -v "$PWD:/work" -w /work qa-native-42 bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            go build -p 2 -ldflags "-X github.com/matrixorigin/matrixone/pkg/version.CommitID=bf15b1c7a82e1801fb0a34f234b77d92d6766606" -o mo-service ./cmd/mo-service
+          '
+      - name: Start isolated MO and run reproductions
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/qa-venv"
+          "$RUNNER_TEMP/qa-venv/bin/pip" -q install pymysql mysql-connector-python
+          mkdir -p "$RUNNER_TEMP/qa-42" "$RUNNER_TEMP/qa-cgroup"
+          cp -a etc "$RUNNER_TEMP/qa-42/etc"
+          docker run -d --name qa-mo-42 --network host -v "$PWD:/work" -v "$RUNNER_TEMP/qa-42:/qa" -v "$RUNNER_TEMP/qa-cgroup:/sys/fs/cgroup:ro" -w /qa -e LD_LIBRARY_PATH=/work/cgo:/work/thirdparties/install/lib --entrypoint /work/mo-service qa-native-42 -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
+          "$RUNNER_TEMP/qa-venv/bin/python" - <<'PY'
+          import time,pymysql,mysql.connector
+          for _ in range(180):
+              try:c=pymysql.connect(host='127.0.0.1',port=6001,user='dump',password='111',autocommit=True,connect_timeout=2);break
+              except (OSError,pymysql.MySQLError):time.sleep(2)
+          else:raise RuntimeError('MO did not start')
+          def q(s):
+              with c.cursor() as cur:cur.execute(s);return cur.fetchall() if cur.description else ()
+          v=q('select git_version()')[0][0];print('MO version',v,flush=True);assert v=='bf15b1c7a82e1801fb0a34f234b77d92d6766606',v
+          failures=[]
+          try:
+              q('create database qa32344');q('use qa32344')
+              q("create table t(id int primary key,c_nodflt varchar(64),c_nulltxt varchar(64) default 'null',c_dflt varchar(64) default 'hello')")
+              sql="select column_name,column_default,column_default is null,hex(column_default) from information_schema.columns where table_schema=database() and table_name='t' order by ordinal_position"
+              before=q(sql);q("insert into t values(1,'a','b','c')");q('truncate table t');after=q(sql)
+              print('32344 BEFORE',before,'AFTER',after,flush=True)
+              if before!=after:failures.append('32344 metadata changed')
+              q('insert into t(id) values(2)');print('32344 defaults',q('select * from t'),flush=True)
+          except Exception as e:print('32344 exception',repr(e),flush=True);failures.append('32344 exception')
+          try:
+              b=mysql.connector.connect(host='127.0.0.1',port=6001,user='dump',password='111',ssl_disabled=True,use_pure=True)
+              for s in ('SELECT %s','EXPLAIN SELECT %s','EXPLAIN ANALYZE SELECT %s'):
+                  cur=b.cursor(prepared=True)
+                  try:cur.execute(s,(1,));result=cur.fetchall();print('32367',s,'OK',result,flush=True)
+                  except mysql.connector.Error as e:print('32367',s,'ERROR',e.errno,e.sqlstate,e.msg,flush=True);failures.append('32367 '+s)
+                  finally:cur.close()
+              b.close()
+          except Exception as e:print('32367 exception',repr(e),flush=True);failures.append('32367 exception')
+          c.close();print('FAILURES',failures,flush=True)
+          if failures:raise SystemExit(1)
+          PY
+      - name: Collect diagnostics and stop owned container
+        if: always()
+        run: |
+          if docker inspect qa-mo-42 >/dev/null 2>&1; then docker logs --tail 40 qa-mo-42 || true; docker rm -f qa-mo-42 || true; fi
