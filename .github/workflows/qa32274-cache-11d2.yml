@@ -1,0 +1,55 @@
+name: QA 32274 cache download race on official main
+on:
+  push:
+    branches: [codex/qa-cache-11d2]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact official main
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: 11d2e1ef7e1b3ed3a20e6d7f29f912e55118db5b
+      - name: Build native dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = 11d2e1ef7e1b3ed3a20e6d7f29f912e55118db5b
+          docker build --target native -t qa32274-native -f optools/images/Dockerfile .
+      - name: Create test-cleanup diagnostic overlay
+        run: |
+          python3 - <<'PYOVERLAY'
+          import json,pathlib
+          p=pathlib.Path('pkg/fileservice/disk_cache_download_test.go')
+          s=p.read_text()
+          a="cache, _, _ := downloading(t)\n\tctx, cancel := context.WithCancel(context.Background())\n\tpending := readRange(ctx, cache, 6, 5)\n\tcancel()\n\trequire.False(t, waitVector(t, pending).Entries[0].done)"
+          b="cache, pw, filled := downloading(t)\n\tctx, cancel := context.WithCancel(context.Background())\n\tpending := readRange(ctx, cache, 6, 5)\n\tcancel()\n\trequire.False(t, waitVector(t, pending).Entries[0].done)\n\trequire.NoError(t, pw.Close())\n\trequire.NoError(t, <-filled)"
+          assert a in s
+          pathlib.Path('.qa-cache-overlay.go').write_text(s.replace(a,b))
+          pathlib.Path('.qa-cache-overlay.json').write_text(json.dumps({'Replace':{'/work/pkg/fileservice/disk_cache_download_test.go':'/work/.qa-cache-overlay.go'}}))
+          PYOVERLAY
+      - name: Run cache download, cancellation and publication contracts under race
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work qa32274-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            pattern="^(TestDiskCacheReadWaitsForDownloadedBytes|TestDiskCacheReadFallsBackWhenDownloadFails|TestDiskCacheReadOfDownloadStopsOnCancel|TestObjectDownloadReadableAfterPublishOrRemoval|TestDiskCacheReadDeclinesDownloadFarBehind|TestDiskCacheReadWaitsWhenItWouldDuplicateTheDownload|TestDiskCacheDownloadReadsCountAsCachedFileReads|TestDiskCacheContentFillDoesNotFeedDownloadRate|TestDiskCacheDownloadReadOverlappingPublicationCounts|TestS3FSReadFullObjectToDiskCacheStreamingErrorAfterCapture|TestS3FSReadFullObjectToDiskCacheStreamingCancelBeforeCapture|TestS3FSReadFullObjectToDiskCacheStreamingWaitsWhenBackgroundFull|TestS3FSReadFullObjectToDiskCacheStreamingUnexpectedEOF|TestS3FSReadFullObjectToDiskCacheStreamingCancelWhileWaiting)$"
+            go test -race -p 2 -count=3 ./pkg/fileservice/s3fifo ./pkg/fileservice/lrucache
+            set +e
+            go test -v -race -p 2 -count=3 -run "$pattern" ./pkg/fileservice
+            original=$?
+            go test -race -p 2 -count=30 -run "^TestDiskCacheReadOfDownloadStopsOnCancel$" ./pkg/fileservice
+            repeat=$?
+            go test -race -p 2 -count=30 -overlay /work/.qa-cache-overlay.json -run "^TestDiskCacheReadOfDownloadStopsOnCancel$" ./pkg/fileservice
+            overlay=$?
+            echo "ORIGINAL_RESULT=$original REPEAT_RESULT=$repeat OVERLAY_RESULT=$overlay"
+            test "$original" = 0 && test "$repeat" = 0 && test "$overlay" = 0
+          '
