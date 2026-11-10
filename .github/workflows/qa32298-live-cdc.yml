@@ -110,7 +110,7 @@ jobs:
         run: |
           set -euo pipefail
           docker rm -f qa-up-main >/dev/null
-          mv "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/rejected-main-data"
+          sudo mv "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/rejected-main-data"
           sudo cp -a "$RUNNER_TEMP/qa-up/old-backup" "$RUNNER_TEMP/qa-up/root/mo-data"
           docker run -d --name qa-up-old-restored --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/old/lib --entrypoint /work/old/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
           "$RUNNER_TEMP/qa-up/venv/bin/python" - <<'PYVERIFY'
