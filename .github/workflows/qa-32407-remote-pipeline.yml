@@ -1,0 +1,32 @@
+name: QA 32407 remote pipeline
+on:
+  push:
+    branches: [codex/qa-32407-remote-pipeline-20261110]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: 2f6fcc772175d0c0e80ad97aac6d44360c513347
+      - name: Build native dependencies
+        run: docker build --target native -t qa-snapshot-native -f optools/images/Dockerfile .
+      - name: Exercise real remote pipeline and binary prepared reads
+        run: |
+          mkdir -p "$RUNNER_TEMP/qa-cgroup"
+          docker run --rm -v "$PWD:/work" -v "$RUNNER_TEMP/qa-cgroup:/sys/fs/cgroup:ro" -w /work qa-snapshot-native bash -euc '
+            git config --global --add safe.directory /work
+            test "$(git rev-parse HEAD)" = 2f6fcc772175d0c0e80ad97aac6d44360c513347
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            go test -v -race -p 2 -count=3 -run "^TestMixedSnapshotBinaryPrepare$" ./pkg/tests/issues
+          '
