@@ -131,7 +131,7 @@ jobs:
                       while b'\n' in buffer:
                           line,buffer=buffer.split(b'\n',1)
                           low=line.lower()
-                          if b'update mo_account set create_version' in low:
+                          if b'update mo_account set create_version' in low and b'where account_id = 0' not in low:
                               print('observed tenant create_version update:',line.decode(errors='replace')[:1000],flush=True)
                               subprocess.run(['docker','kill','--signal=KILL','qa-up-main'],check=True)
                               hit=True;break
