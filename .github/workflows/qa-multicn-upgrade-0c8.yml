@@ -1,0 +1,225 @@
+name: Stopped 4.2.5 to main upgrade and trace retention
+on:
+  push:
+    branches: [codex/qa-multicn-upgrade-0c8]
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact official main
+        uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: 0c8bd5e5f3be4ce5582201513161181ddca37d6d
+          fetch-depth: 1
+      - name: Build exact main and native dependencies
+        run: |
+          echo "MO_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "MatrixOne SHA $(git rev-parse HEAD)"
+          docker build --target native -t qa-upgrade-native -f optools/images/Dockerfile .
+          docker run --rm -e MO_SHA="$(git rev-parse HEAD)" -v "$PWD:/work" -w /work qa-upgrade-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            go build -p 2 -ldflags "-X github.com/matrixorigin/matrixone/pkg/version.CommitID=$MO_SHA" -o mo-service ./cmd/mo-service
+          '
+      - name: Prepare official release and isolated data root
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qa-up/root" "$RUNNER_TEMP/qa-up/download" "$RUNNER_TEMP/qa-up/root/new/lib" "$RUNNER_TEMP/qa-up/empty-cgroup"
+          curl --retry 8 --retry-all-errors --retry-delay 5 -fLsS -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' 'https://api.github.com/repos/matrixorigin/matrixone/releases/assets/594879750?qa=20261109' -o "$RUNNER_TEMP/qa-up/release.zip"
+          sha256sum "$RUNNER_TEMP/qa-up/release.zip"
+          unzip -q "$RUNNER_TEMP/qa-up/release.zip" -d "$RUNNER_TEMP/qa-up/download"
+          mv "$RUNNER_TEMP/qa-up/download/mo-v4.2.5-linux-x86_64" "$RUNNER_TEMP/qa-up/root/old"
+          cp -a "$RUNNER_TEMP/qa-up/root/old/etc" "$RUNNER_TEMP/qa-up/root/etc"
+          cp mo-service "$RUNNER_TEMP/qa-up/root/new/mo-service"
+          cp -a thirdparties/install/lib/*.so cgo/libmo.so "$RUNNER_TEMP/qa-up/root/new/lib/"
+          python3 -m venv "$RUNNER_TEMP/qa-up/venv"
+          "$RUNNER_TEMP/qa-up/venv/bin/pip" -q install pymysql
+      - name: Start released 4.2.5 and create durable fixture
+        run: |
+          set -euo pipefail
+          docker run -d --name qa-up-old --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/old/lib --entrypoint /work/old/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
+          "$RUNNER_TEMP/qa-up/venv/bin/python" - <<'PYOLD'
+          import json,pymysql,time,os
+          def conn(user):
+              return pymysql.connect(host='127.0.0.1',port=6001,user=user,password='111',autocommit=True,connect_timeout=2)
+          for _ in range(180):
+              try:c=conn('dump');break
+              except (OSError,pymysql.MySQLError):time.sleep(2)
+          else:raise RuntimeError('release did not become ready')
+          with c.cursor() as q:
+              q.execute('select version(),git_version()');ver=q.fetchone();print('released version',ver)
+              assert '4.2.5' in ver[0],ver
+              q.execute('create database qa_upgrade_data')
+              q.execute('create table qa_upgrade_data.t (id int primary key, d decimal(12,2), s varchar(40), key idx_s(s))')
+              q.execute("insert into qa_upgrade_data.t values (1,12.50,'first'),(2,-9.25,'second')")
+              q.execute("create account qa_upgrade_a admin_name 'admin' identified by '111'")
+              q.execute("create account qa_upgrade_b admin_name 'admin' identified by '111'")
+              for i in range(129):
+                  q.execute("create account qa_upgrade_%03d admin_name 'admin' identified by '111'" % i)
+                  if i%25==24:print('release tenant fixtures created',i+1,flush=True)
+              q.execute('select name,state from mo_debug.trace_features order by name');trace=q.fetchall();print('historical trace feature rows',len(trace))
+              names=('trace_features','trace_table_filters','trace_txn_filters','trace_statement_filters','trace_statement','trace_event_txn','trace_event_data','trace_event_error','trace_event_txn_action')
+              q.execute("select relname from mo_catalog.mo_tables where reldatabase='mo_debug' and relname in ("+','.join('%s' for _ in names)+") order by relname",names)
+              trace_tables=[row[0] for row in q.fetchall()]
+              assert trace_tables==sorted(names),trace_tables
+              print('historical trace tables',len(trace_tables))
+          c.close()
+          for name in ('qa_upgrade_a','qa_upgrade_b') + tuple('qa_upgrade_%03d'%i for i in range(129)):
+              t=conn(name+':admin')
+              with t.cursor() as q:
+                  q.execute('create database qa_upgrade_tenant')
+                  q.execute('create table qa_upgrade_tenant.t(id int primary key,v varchar(30))')
+                  q.execute("insert into qa_upgrade_tenant.t values(1,'retained'),(2,'tenant')")
+              t.close()
+          with open(os.environ['RUNNER_TEMP']+'/qa-up/trace.json','w') as f:json.dump(trace,f)
+          print('release fixture created: system and 131 tenants')
+          PYOLD
+      - name: Preflight real released catalog
+        run: |
+          set -euo pipefail
+          if ! command -v mysql >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y -qq default-mysql-client; fi
+          cat > "$RUNNER_TEMP/qa-up/client.cnf" <<'CNF'
+          [client]
+          host=127.0.0.1
+          port=6001
+          user=dump
+          password=111
+          CNF
+          chmod 600 "$RUNNER_TEMP/qa-up/client.cnf"
+          bash optools/upgrade-4.2-preflight.sh "$RUNNER_TEMP/qa-up/decisions.ndjson" --defaults-extra-file="$RUNNER_TEMP/qa-up/client.cnf"
+          python3 - <<'PYPRE'
+          import json,os
+          p=os.environ['RUNNER_TEMP']+'/qa-up/decisions.ndjson'
+          rows=[json.loads(line) for line in open(p)]
+          print('real release preflight completed, decision rows',len(rows))
+          PYPRE
+      - name: Stop release cleanly and start main against identical data root
+        run: |
+          set -euo pipefail
+          docker kill --signal=INT qa-up-old >/dev/null
+          code=$(timeout 150 docker wait qa-up-old)
+          echo "released process exit code=$code"
+          test "$code" = 0
+          docker rm qa-up-old >/dev/null
+          sudo cp -a "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/old-backup"
+          echo "quiescent release data backup saved"
+          docker run -d --name qa-up-main --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
+      - name: Start a second main CN during upgrade
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCN'
+          import os,re
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'qa-up/root'
+          source=root/'etc/launch/cn.toml'
+          s=source.read_text()
+          s,n=re.subn(r'(?m)^uuid\s*=\s*"[^"]+"', 'uuid = "dd1dccb5-4d3c-41f8-b482-5251dc7a41bf"', s, count=1)
+          assert n == 1
+          s,n=re.subn(r'(?m)^port-base\s*=\s*\d+', 'port-base = 18100', s, count=1)
+          assert n == 1
+          s,n=re.subn(r'(?m)^status-port\s*=\s*\d+', 'status-port = 7002', s, count=1)
+          if not n:s+='\n[observability]\nstatus-port = 7002\n'
+          if re.search(r'(?m)^\[cn\.frontend\]\s*$',s):
+              s=re.sub(r'(?m)^(\[cn\.frontend\]\s*)$',r'\1\nport = 6002',s,count=1)
+          else:s+='\n[cn.frontend]\nport = 6002\n'
+          (root/'etc/launch/cn2-qa.toml').write_text(s)
+          PYCN
+          docker run -d --name qa-up-cn2 --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -cfg etc/launch/cn2-qa.toml -debug-http=127.0.0.1:16091
+      - name: Validate main upgrade and restart
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/qa-up/check.py" <<'PYCHECK'
+          import json,pymysql,time,os
+          def conn(user):return pymysql.connect(host='127.0.0.1',port=int(os.environ.get('QA_PORT','6001')),user=user,password='111',autocommit=True,connect_timeout=2)
+          for _ in range(180):
+              try:c=conn('dump');break
+              except (OSError,pymysql.MySQLError):time.sleep(2)
+          else:raise RuntimeError('main did not become SQL ready')
+          with c.cursor() as q:
+              q.execute('select git_version()');v=q.fetchone()[0];print('checked version',v);assert v==os.environ.get('QA_EXPECT_VERSION',os.environ['MO_SHA']),v
+              q.execute('select id,cast(d as char),s from qa_upgrade_data.t order by id');rows=q.fetchall();assert rows==((1,'12.50','first'),(2,'-9.25','second')),rows
+              q.execute('select name,state from mo_debug.trace_features order by name');got=q.fetchall()
+              expected=json.load(open(os.environ['RUNNER_TEMP']+'/qa-up/trace.json'));assert [list(x) for x in got]==expected,(got,expected)
+              names=('trace_features','trace_table_filters','trace_txn_filters','trace_statement_filters','trace_statement','trace_event_txn','trace_event_data','trace_event_error','trace_event_txn_action')
+              q.execute("select relname from mo_catalog.mo_tables where reldatabase='mo_debug' and relname in ("+','.join('%s' for _ in names)+") order by relname",names)
+              trace_tables=[row[0] for row in q.fetchall()]
+              assert trace_tables==sorted(names),trace_tables
+              print('historical trace tables retained',len(trace_tables))
+              q.execute("select count(*) from information_schema.tables where table_schema='qa_upgrade_data' and table_name='t'");assert q.fetchone()==(1,)
+              print('system table data, metadata and historical trace rows retained',len(got))
+          c.close()
+          for name in ('qa_upgrade_a','qa_upgrade_b') + tuple('qa_upgrade_%03d'%i for i in range(129)):
+              t=conn(name+':admin')
+              with t.cursor() as q:
+                  q.execute('select id,v from qa_upgrade_tenant.t order by id');rows=q.fetchall();assert rows==((1,'retained'),(2,'tenant')),rows
+                  q.execute("select count(*) from information_schema.partitions where table_schema='qa_upgrade_tenant' and table_name='t'")
+                  partition_count=q.fetchone()[0]
+                  if os.environ.get('QA_EXPECT_VERSION') is None:
+                      assert partition_count==1,(name,partition_count)
+              t.close()
+          print('all 131 tenant rows and partitions metadata retained')
+          PYCHECK
+          "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
+          QA_PORT=6002 "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
+          echo 'both CNs validated after upgrade'
+          docker kill --signal=INT qa-up-main >/dev/null
+          code=$(timeout 150 docker wait qa-up-main); echo "first main exit code=$code"; test "$code" = 0
+          docker start qa-up-main >/dev/null
+          "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
+      - name: Restore quiescent 4.2 backup and verify
+        run: |
+          set -euo pipefail
+          docker rm -f qa-up-cn2 >/dev/null
+          docker kill --signal=INT qa-up-main >/dev/null
+          test "$(timeout 150 docker wait qa-up-main)" = 0
+          docker rm qa-up-main >/dev/null
+          mv "$RUNNER_TEMP/qa-up/root/mo-data" "$RUNNER_TEMP/qa-up/root/mo-data-after-first-upgrade"
+          sudo cp -a "$RUNNER_TEMP/qa-up/old-backup" "$RUNNER_TEMP/qa-up/root/mo-data"
+          docker run -d --name qa-up-restored-old --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/old/lib --entrypoint /work/old/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
+          QA_EXPECT_VERSION=1a44f3d "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
+          docker kill --signal=INT qa-up-restored-old >/dev/null
+          test "$(timeout 150 docker wait qa-up-restored-old)" = 0
+          docker rm qa-up-restored-old >/dev/null
+          echo 'restored 4.2.5 copy verified before a new forward upgrade'
+          docker run -d --name qa-up-interrupt --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
+          "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
+          echo '4.2 backup restored to separate root and data verified'
+      - name: Verify fresh main omits retired trace tables
+        run: |
+          set -euo pipefail
+          docker rm -f qa-up-interrupt >/dev/null
+          mkdir -p "$RUNNER_TEMP/qa-up/fresh"
+          cp -a "$RUNNER_TEMP/qa-up/root/etc" "$RUNNER_TEMP/qa-up/fresh/etc"
+          docker run -d --name qa-up-fresh --network host -v "$RUNNER_TEMP/qa-up/fresh:/work" -v "$RUNNER_TEMP/qa-up/root/new:/new:ro" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/new/lib --entrypoint /new/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
+          "$RUNNER_TEMP/qa-up/venv/bin/python" - <<'PYFRESH'
+          import os,pymysql,time
+          for _ in range(180):
+              try:
+                  c=pymysql.connect(host='127.0.0.1',port=6001,user='dump',password='111',autocommit=True,connect_timeout=2)
+                  break
+              except (OSError,pymysql.MySQLError):time.sleep(2)
+          else:raise RuntimeError('fresh main did not become SQL ready')
+          names=('trace_features','trace_table_filters','trace_txn_filters','trace_statement_filters','trace_statement','trace_event_txn','trace_event_data','trace_event_error','trace_event_txn_action')
+          with c.cursor() as q:
+              q.execute('select git_version()'); assert q.fetchone()[0] == os.environ['MO_SHA']
+              q.execute("select relname from mo_catalog.mo_tables where reldatabase='mo_debug' and relname in ("+','.join('%s' for _ in names)+")",names)
+              assert q.fetchall()==(), 'fresh main contains retired trace tables'
+          c.close()
+          print('fresh main has none of the nine retired trace tables')
+          PYFRESH
+      - name: Collect diagnostics and clean up
+        if: always()
+        run: |
+          for name in qa-up-old qa-up-main qa-up-restored-old qa-up-interrupt qa-up-fresh qa-up-cn2; do
+            if docker inspect "$name" >/dev/null 2>&1; then docker logs --tail 70 "$name" || true; docker rm -f "$name" || true; fi
+          done
