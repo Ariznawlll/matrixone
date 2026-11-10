@@ -1,0 +1,20 @@
+
+func TestQAEmptyPoolCancellationBoundary(t *testing.T) {
+ backend := NewMockBackend()
+ cfg := &Config{ClientMaxCount: 1, ClientBufSize: 128, ClientRetryTimes: 1, MaxTimeout: time.Second,
+  ClientFactory: func() (logservice.Client, error) { return newMockBackendClient(backend), nil }}
+ pool := newClientPool(cfg)
+ t.Cleanup(pool.Close)
+ held, err := pool.Get()
+ require.NoError(t, err)
+ d := &LogServiceDriver{clientPool: pool, config: *cfg}
+ ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+ defer cancel()
+ done := make(chan error, 1)
+ go func() { _, e := d.getTruncatedPSNFromBackend(ctx); done <- e }()
+ <-ctx.Done()
+ select { case e := <-done: t.Fatalf("pool unexpectedly returned before release: %v", e); case <-time.After(100*time.Millisecond): }
+ pool.Put(held)
+ select { case e := <-done: require.Error(t, e); require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+ case <-time.After(time.Second): t.Fatal("request did not finish after client released") }
+}

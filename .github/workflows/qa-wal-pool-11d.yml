@@ -1,0 +1,36 @@
+name: QA WAL client pool cancellation boundary
+on:
+  push:
+    branches: [codex/qa-wal-pool-11d]
+permissions:
+  contents: read
+jobs:
+  pool:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: harness
+      - uses: actions/checkout@v4
+        with:
+          repository: matrixorigin/matrixone
+          ref: 11d2e1ef7e1b3ed3a20e6d7f29f912e55118db5b
+          path: source
+      - name: Build native dependencies
+        working-directory: source
+        run: docker build --target native -t qa-wal-pool-native -f optools/images/Dockerfile .
+      - name: Probe known empty-pool boundary on exact main
+        run: |
+          cat harness/.github/qa/empty-pool-test.txt >> source/pkg/vm/engine/tae/logstore/driver/logservicedriver/clientpool_test.go
+          docker run --rm -v "$PWD/source:/work" -w /work qa-wal-pool-native bash -euc '
+            git config --global --add safe.directory /work
+            src=/go/src/github.com/matrixorigin/matrixone
+            cp -a "$src/thirdparties/install" thirdparties/
+            cp "$src/cgo/libmo.so" "$src/cgo/libmo.a" cgo/
+            export CGO_ENABLED=1 GOEXPERIMENT=simd GOAMD64=v3
+            export CGO_CFLAGS="-I/work/cgo -I/work/thirdparties/install/include"
+            export CGO_LDFLAGS="-L/work/cgo -lmo -L/work/thirdparties/install/lib -Wl,-rpath,/work/cgo -Wl,-rpath,/work/thirdparties/install/lib"
+            export LD_LIBRARY_PATH="/work/cgo:/work/thirdparties/install/lib"
+            go test -v -race -p 2 -count=10 -run "^TestQAEmptyPoolCancellationBoundary$" ./pkg/vm/engine/tae/logstore/driver/logservicedriver
+          '
