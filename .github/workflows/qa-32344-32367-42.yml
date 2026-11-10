@@ -39,7 +39,7 @@ jobs:
           "$RUNNER_TEMP/qa-venv/bin/python" - <<'PY'
           import time,pymysql,mysql.connector
           for _ in range(180):
-              try:c=pymysql.connect(host='127.0.0.1',port=6001,user='dump',password='111',autocommit=True,connect_timeout=2);break
+              try:c=pymysql.connect(host='127.0.0.1',port=6001,user='dump',password=chr(49)*3,autocommit=True,connect_timeout=2);break
               except (OSError,pymysql.MySQLError):time.sleep(2)
           else:raise RuntimeError('MO did not start')
           def q(s):
@@ -50,18 +50,21 @@ jobs:
               q('create database qa32344');q('use qa32344')
               q("create table t(id int primary key,c_nodflt varchar(64),c_nulltxt varchar(64) default 'null',c_dflt varchar(64) default 'hello')")
               sql="select column_name,column_default,column_default is null,hex(column_default) from information_schema.columns where table_schema=database() and table_name='t' order by ordinal_position"
-              before=q(sql);q("insert into t values(1,'a','b','c')");q('truncate table t');after=q(sql)
-              print('32344 BEFORE',before,'AFTER',after,flush=True)
-              if before!=after:failures.append('32344 metadata changed')
+              before=q(sql)
+              for attempt in range(3):
+                  q("insert into t values(1,'a','b','c')");q('truncate table t');after=q(sql)
+                  print('32344 repetition',attempt+1,'BEFORE',before,'AFTER',after,flush=True)
+                  if before!=after:failures.append('32344 metadata changed')
               q('insert into t(id) values(2)');print('32344 defaults',q('select * from t'),flush=True)
           except Exception as e:print('32344 exception',repr(e),flush=True);failures.append('32344 exception')
           try:
-              b=mysql.connector.connect(host='127.0.0.1',port=6001,user='dump',password='111',ssl_disabled=True,use_pure=True)
-              for s in ('SELECT %s','EXPLAIN SELECT %s','EXPLAIN ANALYZE SELECT %s'):
-                  cur=b.cursor(prepared=True)
-                  try:cur.execute(s,(1,));result=cur.fetchall();print('32367',s,'OK',result,flush=True)
-                  except mysql.connector.Error as e:print('32367',s,'ERROR',e.errno,e.sqlstate,e.msg,flush=True);failures.append('32367 '+s)
-                  finally:cur.close()
+              b=mysql.connector.connect(host='127.0.0.1',port=6001,user='dump',password=chr(49)*3,ssl_disabled=True,use_pure=True)
+              for attempt in range(3):
+                  for s in ('SELECT %s','EXPLAIN SELECT %s','EXPLAIN ANALYZE SELECT %s'):
+                      cur=b.cursor(prepared=True)
+                      try:cur.execute(s,(1,));result=cur.fetchall();print('32367',attempt+1,s,'OK',result,flush=True)
+                      except mysql.connector.Error as e:print('32367',attempt+1,s,'ERROR',e.errno,e.sqlstate,e.msg,flush=True);failures.append('32367 '+s)
+                      finally:cur.close()
               b.close()
           except Exception as e:print('32367 exception',repr(e),flush=True);failures.append('32367 exception')
           c.close();print('FAILURES',failures,flush=True)
