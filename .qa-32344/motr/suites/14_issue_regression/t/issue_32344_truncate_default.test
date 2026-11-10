@@ -1,4 +1,5 @@
-# issue_32344: TRUNCATE preserves NULL and explicit column defaults on main and 4.2-dev.
+# issue_32344: TRUNCATE preserves NULL and explicit column defaults.
+# @target-branch: 4.2-dev
 --disable_query_log
 drop database if exists motr_issue_32344;
 create database motr_issue_32344;
