@@ -40,6 +40,14 @@ jobs:
           unzip -q "$RUNNER_TEMP/qa-up/release.zip" -d "$RUNNER_TEMP/qa-up/download"
           mv "$RUNNER_TEMP/qa-up/download/mo-v4.2.5-linux-x86_64" "$RUNNER_TEMP/qa-up/root/old"
           cp -a "$RUNNER_TEMP/qa-up/root/old/etc" "$RUNNER_TEMP/qa-up/root/etc"
+          python3 - <<'PYCONFIG'
+          import os
+          from pathlib import Path
+          cn=Path(os.environ['RUNNER_TEMP'])/'qa-up/root/etc/launch/cn.toml'
+          content=cn.read_text()
+          assert '[cn.txn.trace]' not in content
+          cn.write_text(content+'\n[cn.txn.trace]\nload-to-mo = true\nforce-flush-duration = "2s"\n')
+          PYCONFIG
           cp mo-service "$RUNNER_TEMP/qa-up/root/new/mo-service"
           cp -a thirdparties/install/lib/*.so cgo/libmo.so "$RUNNER_TEMP/qa-up/root/new/lib/"
           python3 -m venv "$RUNNER_TEMP/qa-up/venv"
