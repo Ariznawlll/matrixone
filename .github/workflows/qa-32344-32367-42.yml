@@ -29,6 +29,8 @@ jobs:
             go build -p 2 -ldflags "-X github.com/matrixorigin/matrixone/pkg/version.CommitID=bf15b1c7a82e1801fb0a34f234b77d92d6766606" -o mo-service ./cmd/mo-service
           '
       - name: Start isolated MO and run reproductions
+        id: products
+        continue-on-error: true
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/qa-venv"
@@ -70,6 +72,23 @@ jobs:
           c.close();print('FAILURES',failures,flush=True)
           if failures:raise SystemExit(1)
           PY
+      - name: Run 32344 MOTR regression on 4.2-dev
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/qa-venv/bin/pip" -q install PyYAML
+          git clone --quiet --depth 1 --branch codex/qa-32344-truncate-default https://github.com/Ariznawlll/motr.git "$RUNNER_TEMP/motr"
+          cd "$RUNNER_TEMP/motr"
+          "$RUNNER_TEMP/qa-venv/bin/python" - <<'PYCFG'
+          import os,yaml
+          p=yaml.safe_load(open('config.yml'))
+          p['connection'].update(host='127.0.0.1',port=6001,user='dump',password=chr(49)*3)
+          p['run']['report_dir']=os.environ['RUNNER_TEMP']+'/motr-report'
+          with open(os.environ['RUNNER_TEMP']+'/qa-motr.yml','w') as f:yaml.safe_dump(p,f)
+          PYCFG
+          PATH="$RUNNER_TEMP/qa-venv/bin:$PATH" ./motr --config "$RUNNER_TEMP/qa-motr.yml" --branch 4.2-dev --repeat 3 14_issue_regression.issue_32344_truncate_default
+      - name: Preserve 4.2 product result
+        if: always() && steps.products.outcome == 'failure'
+        run: exit 1
       - name: Collect diagnostics and stop owned container
         if: always()
         run: |
