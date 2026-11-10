@@ -84,6 +84,7 @@ jobs:
               print('seeded trace filter data via supported txn-trace commands')
               q.execute("select mo_ctl('cn','txn-trace','enable txn')");print('trace enable',q.fetchall())
               time.sleep(15)
+              q.execute("select name,state from mo_debug.trace_features order by name");print('trace state after enable',q.fetchall(),flush=True)
               event_conn=conn('root')
               with event_conn.cursor() as event_query:
                   event_query.execute('create table qa_upgrade_data.trace_work(id int primary key, v int)')
@@ -235,5 +236,8 @@ jobs:
         if: always()
         run: |
           for name in qa-up-old qa-up-main qa-up-restored-old qa-up-interrupt qa-up-fresh; do
-            if docker inspect "$name" >/dev/null 2>&1; then docker logs --tail 70 "$name" || true; docker rm -f "$name" || true; fi
+            if docker inspect "$name" >/dev/null 2>&1; then
+              if [ "$name" = qa-up-old ]; then docker logs "$name" 2>&1 | grep -iE 'txn-trace|trace_event_txn|failed to fetch trace|load trace' | tail -100 || true; fi
+              docker logs --tail 70 "$name" || true; docker rm -f "$name" || true
+            fi
           done
