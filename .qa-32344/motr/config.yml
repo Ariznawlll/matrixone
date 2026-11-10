@@ -1,0 +1,247 @@
+# Default connection (used by --target matrixone, the default).
+connection:
+  host: "127.0.0.1"
+  port: 6001
+  user: "dump"
+  password: "111"
+  database: "test"
+  charset: "utf8mb4"
+  connect_timeout: 10
+  read_timeout: 120
+
+# Extra targets selectable via --target NAME.
+# Example: `./motr --record --target mysql` records baselines against MySQL.
+targets:
+  mysql:
+    host: "127.0.0.1"
+    port: 3306
+    user: "root"
+    password: ""
+    database: "test"
+    charset: "utf8mb4"
+    connect_timeout: 10
+    read_timeout: 120
+
+run:
+  suites_root: "suites"
+  report_dir: "var/log"
+  # Default workers for normal MOTR runs. `-j N` overrides this setting.
+  # Keep destructive/global-state cases in `exclusive_tests` below.
+  parallel_workers: 6
+  # Per-case wall-clock watchdog. This includes connection and local cleanup.
+  heartbeat_sec: 30
+  case_timeout_sec: 600
+  suite_case_timeouts:
+    19_operator_boundaries: 900
+    02_gc_checkpoint_flush: 1800
+    05_vector_index: 1800
+  # Bound per-case golden capture and best-effort diagnostics independently.
+  output_limit_bytes: 67108864
+  output_spool_memory_bytes: 1048576
+  result_payload_limit_bytes: 262144
+  event_journal_limit_bytes: 268435456
+  result_storage_limit_bytes: 1073741824
+  # Default shell-script timeout (seconds). Override per suite below or via MOTR_SCRIPT_TIMEOUT.
+  script_timeout_sec: 600
+  suite_script_timeouts:
+    19_operator_boundaries: 840
+    05_vector_index: 1800
+    # C-10 fences old GCKPs, executes 62 synchronous forced ICKPs, and then
+    # waits for the automatic GCKP. Keep per-statement timeouts bounded, but do
+    # not let the generic 10-minute script wrapper hide which checkpoint failed.
+    02_gc_checkpoint_flush: 1800
+    issue_10313_storage_query: 900
+    issue_24446_ddl: 2400
+    # Java app suites: Maven build + HTTP scans + optional app clone/start.
+    15_java_mybatis: 7200
+    # Real Kafka Connect worker startup and four-partition replay.
+    17_eos_sink: 1200
+  # Global exclude list - suites listed here will be skipped during discovery
+  # Supports both exact names and regex patterns
+  exclude_suites:
+    - issue_24446_ddl
+    - issue_10313_storage_query
+    - 03_cdc
+    # Opt-in: needs JDK/Maven; RuoYi/芋道 also need Redis + running apps.
+    # Run with: ./motr --suite 15_java_mybatis
+    - 15_java_mybatis
+    # Opt-in: requires the Arrow S3 gate provisioned by mo-nightly-regression.
+    # Run with: ./motr --suite 16_arrow_load
+    - 16_arrow_load
+    # Opt-in: real Kafka broker, two Connect workers and native sink plugin.
+    - 17_eos_sink
+    # Opt-in: requires a disposable Kafka broker reachable by MO and runner.
+    - 18_kafka_source
+    # Opt-in: >2 GiB varlen fixture; dedicated, sequential nightly phase only.
+    - 19_operator_boundaries
+  # Tests listed here run sequentially (alone) even when -j > 1.
+  # Use for tests that are sensitive to concurrent DN flush/checkpoint/restore.
+  # Supports exact names ("suite.test") and regex patterns.
+  exclusive_tests:
+    - '19_operator_boundaries\..*'
+    # Account/cluster restore mutates global catalogue and history state.
+    # Never enable except on an exclusively owned disposable cluster.
+    - 14_issue_regression.issue_31190_sdk_restore
+    # Creates and drops temporary accounts, CDC tasks and PITR metadata; this
+    # must run only on a disposable cluster and without concurrent cases.
+    - 14_issue_regression.issue_31967_sdk_cdc_uri
+    # This opt-in case changes global wait_timeout and restores it. It must
+    # not run alongside other cases sharing that CN's session defaults.
+    - 14_issue_regression.issue_31510_wait_timeout
+    # GPU opt-in only: this case creates/drops a tenant account. Follow the
+    # existing account lifecycle catalog/lock isolation policy, not a GPU-wide
+    # serialization rule or a workaround for missing object cleanup.
+    - 05_vector_index.issue_28996_27453_30185_gpu_contract
+    - '15_java_mybatis\..*'
+    # These regressions create/drop tenant accounts. Account teardown changes
+    # shared catalog state, so run them after the parallel SQL pool.
+    - 14_issue_regression.issue_30949_subscription_branch
+    - 14_issue_regression.issue_30950_publication_coverage_owner
+    - 14_issue_regression.issue_31916_account_isolation
+    - 14_issue_regression.issue_31394_31603_account_mapping
+    # ALTER ROLE ADD/DROP RULE invalidates prepared handles in other sessions
+    # of the same account on the CN. Run 39710569874 hit 1615 in unrelated
+    # numeric cases while issue_29597 changed policy. Isolate the mutators,
+    # preserving prepared assertions without retries or skips.
+    - 14_issue_regression.issue_23271_row_column_access_control
+    - 14_issue_regression.issue_23271_rule_binding_revoke
+    - 14_issue_regression.issue_29093_view_row_rule
+    - 14_issue_regression.issue_29597_saved_result_policy
+    # Account cleanup fans out to every CN. Keep this case out of the parallel
+    # pool so concurrent catalog/connection cleanup cannot consume its timeout.
+    - 08_multitenant_rbac.s-3_4
+    # DROP ACCOUNT takes the global SNAPSHOT barrier before the account-name
+    # lock and also fans out connection cleanup. Run these account lifecycle
+    # semantic cases alone, after the parallel pool (run 39975529250 hit
+    # a 15s account-lifecycle global barrier wait). This isolates cross-case
+    # interference; it does not fix MO locking or remove concurrency deliberately
+    # exercised inside an individual regression.
+    - 08_multitenant_rbac.issue_26618_insert_only_pk
+    - 08_multitenant_rbac.issue_28279_subscription_secondary_indexes
+    - 08_multitenant_rbac.s-1_1
+    - 08_multitenant_rbac.s-1_2
+    - 08_multitenant_rbac.s-1_3
+    - 08_multitenant_rbac.s-1_4
+    - 08_multitenant_rbac.s-3_3
+    - 08_multitenant_rbac.s-3_5
+    - 08_multitenant_rbac.s-3_6
+    - 08_multitenant_rbac.s-3_7
+    - 08_multitenant_rbac.s-3_8
+    - 08_multitenant_rbac.s-3_10
+    - 08_multitenant_rbac.s-3_11
+    - 08_multitenant_rbac.s-3_12
+    - 08_multitenant_rbac.s-4_1
+    - 08_multitenant_rbac.s-4_2
+    - 08_multitenant_rbac.s-6_1
+    - 08_multitenant_rbac.s-6_2
+    - 08_multitenant_rbac.s-6_4
+    - 08_multitenant_rbac.s-6_5
+    - 14_issue_regression.issue_15972_tenant_sysview_isolation
+    - 14_issue_regression.issue_25601_publication_add_column
+    - 14_issue_regression.issue_27650_27651_revoked_roles
+    - 14_issue_regression.issue_27650_binary_role_revoke
+    - 14_issue_regression.issue_27656_information_schema_visibility
+    - 14_issue_regression.issue_27664_sql_mode_persistence
+    - 14_issue_regression.issue_27719_sql_task_account_cleanup
+    - 14_issue_regression.issue_27759_subscription_index_metadata
+    # CREATE/DROP ACCOUNT in this publication fixture shares the global
+    # SNAPSHOT barrier and CN connection cleanup with the cases above.
+    - 14_issue_regression.issue_27767_publication_view_scope
+    - 14_issue_regression.issue_27794_subscription_metadata
+    # Existing suite exclusions stay intact. Explicit opt-in still needs the
+    # same account isolation; the DDL stress case's internal workers are kept.
+    - 03_cdc.issue_24833_cloud_credentials
+    - issue_24446_ddl.issue_24446_ddl
+    - issue_24446_ddl.run_test
+    # Run 38213308113: DROP DATABASE in s-3_2 and CREATE OR REPLACE VIEW in
+    # issue_27983 hit 20706 amid parallel catalog work. Isolating them is a CI
+    # mitigation; it neither changes their assertions nor establishes a common
+    # MatrixOne root cause for the two lock conflicts.
+    - 08_multitenant_rbac.s-3_2
+    - 14_issue_regression.issue_27983_group_by_fd_prepare
+    # s-4_4 publishes sys_pub to ACCOUNT ALL; the global publication appeared
+    # in s-4_3's SHOW SUBSCRIPTIONS ALL while the cases ran concurrently.
+    # Keep both out of the parallel pool to preserve the original assertion.
+    - 08_multitenant_rbac.s-4_3
+    - 08_multitenant_rbac.s-4_4
+    # This cross-CN regression creates/drops tenant accounts; isolate its catalog lifecycle.
+    - 08_multitenant_rbac.feature_23371_cross_cn_auth
+    - 08_multitenant_rbac.feature_23371_permissions
+    - 08_multitenant_rbac.feature_23371_subscription
+    # Snapshot, PITR, and restore operations mutate global snapshot metadata
+    # or whole tenant catalogs. Run the entire suite sequentially after the
+    # parallel pool so these operations cannot interfere with other cases.
+    - '04_snapshot_pitr\..*'
+    # These cases live outside 04_snapshot_pitr but create account-level
+    # snapshots. Their metadata is visible to every normal-table ALTER, so
+    # they must not race the parallel DDL pool.
+    - '02_gc_checkpoint_flush\.g-02'
+    - '12_git4data\.bd-10'
+    - '13_cross_dimension\.x-(2|4|6)'
+    # Issue #27116 mutates named snapshot metadata and restores catalog data;
+    # keep it out of the parallel issue-regression pool.
+    - 14_issue_regression.issue_27116_snapshot_scope
+    # Issue #27050 creates/drops a globally named snapshot to validate
+    # sequence-source CLONE rejection atomically.
+    - 14_issue_regression.issue_27050_clone_sequence
+    # Issues #27927/#27941 create an account snapshot and switch asynchronous
+    # HNSW/FULLTEXT2 generations. Keep that global snapshot/catalog lifecycle
+    # isolated while the scenario polls old and new index visibility.
+    - 14_issue_regression.issue_27927_27941_snapshot_index
+    - 02_gc_checkpoint_flush.c-03
+    - 02_gc_checkpoint_flush.c-10
+    - 11_load_export.s-3_1
+    # DATA BRANCH DDL updates shared branch/snapshot catalog state. Parallel
+    # CREATE/PICK/MERGE operations can deadlock even when cases use different
+    # databases, so keep every Data Branch regression out of the pool.
+    - '12_git4data\..*'
+    - '14_issue_regression\.issue_.*_data_branch_.*'
+    # #30343 exercises DATA BRANCH CHECK-name regeneration and its shared
+    # branch catalog state; serialize it with other branch lifecycle tests.
+    - 14_issue_regression.issue_30343_check_namespace
+    # This case changes max_prepared_stmt_count globally. Keep it out of the
+    # parallel pool so other PREPARE tests never observe its temporary limit.
+    - 14_issue_regression.issue_25982_prepared_stmt_limit
+    # #30347 deliberately changes sys role policies to test cross-account
+    # isolation and same-account handle invalidation (1615). Those changes
+    # invalidate unrelated sys PREPARE handles, so run after the parallel pool.
+    - 14_issue_regression.issue_30347_role_account_isolation
+    # Async irregular-index CDC waits (~60-120s). Keep out of the parallel pool.
+    - 14_issue_regression.issue_26341_async_cdc_update
+    # #29184 changes a CN's cluster-wide work state to Draining. Other Proxy
+    # tests must not run until the scenario has verified restoration.
+    - 14_issue_regression.issue_29184_proxy_last_insert_id
+    # These regressions force TN flushes to materialize object/block boundaries.
+    - 14_issue_regression.issue_26817_26808_26802_26801_storage_index
+    # Observes physical block pruning after flushing only its own small fixture.
+    - 14_issue_regression.prepared_pruning
+    # #29515 compares actual scan blocks on a persisted 100k-row fixture.
+    - 14_issue_regression.issue_29515_binary_decimal_filter
+    # TC-02's transactional DROP TABLE can deadlock with concurrent catalog
+    # cleanup (ERROR 20701). Keep it serial pending a MatrixOne lockservice fix.
+    - 09_ddl_schema.tc-02
+    # Run 37874777871: these cases hit 20706 while sharing the parallel pool.
+    # Isolate their case-level assertions from other catalog work; this is a CI
+    # mitigation, not a fix or proof that all failures share MO #29814's cause.
+    - '09_ddl_schema\.hr-4'
+    - '09_ddl_schema\.tc-03'
+    - '11_load_export\.s-3_3'
+    - '14_issue_regression\.issue_26892_prepared_fk_checks'
+    - '14_issue_regression\.issue_27968_ivfflat_large_limit'
+    - '14_issue_regression\.issue_25821_protocol_mark_join'
+    - '14_issue_regression\.issue_23062_scalar_subquery_cardinality'
+    - '14_issue_regression\.issue_25821_mark_join_three_valued'
+    - '14_issue_regression\.issue_26820_26825_26827_26838_26839_26896_sql_semantics'
+    - '14_issue_regression\.issue_26935_insert_set_operations'
+    - '14_issue_regression\.issue_27922_cluster_truncate'
+    - '14_issue_regression\.issue_29146_prepared_generated_insert_select'
+    # Run 35689987071 exposed topology-sensitive index readiness and catalog
+    # cleanup failures in these cases. Keep them serial while preserving their
+    # correctness assertions instead of weakening the expected results.
+    - 05_vector_index.vector_contract_matrix_p0
+    - 14_issue_regression.issue_23143_alter_auto_increment
+    - 14_issue_regression.issue_27759_subscription_scope_edges
+    # Run 41468243322 aborted at the first ALTER ADD CHECK with a 20706
+    # catalog lock FastFail while eight MOTR workers were active. Preserve
+    # every CHECK assertion, but run this case after the parallel SQL pool.
+    - 14_issue_regression.issue_25387_alter_check

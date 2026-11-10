@@ -13,6 +13,12 @@ jobs:
         with:
           repository: matrixorigin/matrixone
           ref: bf15b1c7a82e1801fb0a34f234b77d92d6766606
+      - name: Checkout isolated MOTR harness from this test branch
+        uses: actions/checkout@v4
+        with:
+          repository: Ariznawlll/matrixone
+          ref: codex/qa-32344-32367-4-2-20261110
+          path: _qa
       - name: Build exact 4.2-dev
         run: |
           test "$(git rev-parse HEAD)" = bf15b1c7a82e1801fb0a34f234b77d92d6766606
@@ -76,8 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/qa-venv/bin/pip" -q install PyYAML
-          git clone --quiet --depth 1 --branch codex/qa-32344-truncate-default https://github.com/Ariznawlll/motr.git "$RUNNER_TEMP/motr"
-          cd "$RUNNER_TEMP/motr"
+          cd "$GITHUB_WORKSPACE/_qa/.qa-32344/motr"
           "$RUNNER_TEMP/qa-venv/bin/python" - <<'PYCFG'
           import os,yaml
           p=yaml.safe_load(open('config.yml'))

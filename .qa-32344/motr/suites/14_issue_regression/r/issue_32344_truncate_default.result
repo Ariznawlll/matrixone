@@ -1,0 +1,22 @@
+create table t(id int primary key, c_nodflt varchar(64), c_nulltxt varchar(64) default 'null', c_dflt varchar(64) default 'hello', c_explicit varchar(8) default null)
+create table before_defaults as select column_name, column_default from information_schema.columns where table_schema=database() and table_name='t'
+insert into t values (1,'a','b','c',null)
+truncate table t
+select c.column_name, c.column_default is null as is_sql_null from information_schema.columns c where c.table_schema=database() and c.table_name='t' order by c.ordinal_position
+column_name	is_sql_null
+id	1
+c_nodflt	1
+c_nulltxt	0
+c_dflt	0
+c_explicit	1
+select count(*) as changed_defaults from before_defaults b join information_schema.columns c on b.column_name=c.column_name where c.table_schema=database() and c.table_name='t' and not (b.column_default <=> c.column_default)
+changed_defaults
+0
+insert into t(id) values (2)
+select id,c_nodflt,c_nulltxt,c_dflt,c_explicit from t order by id
+id	c_nodflt	c_nulltxt	c_dflt	c_explicit
+2	NULL	null	hello	NULL
+truncate table t
+select count(*) as changed_defaults from before_defaults b join information_schema.columns c on b.column_name=c.column_name where c.table_schema=database() and c.table_name='t' and not (b.column_default <=> c.column_default)
+changed_defaults
+0

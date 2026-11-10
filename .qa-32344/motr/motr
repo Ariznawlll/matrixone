@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# `motr` — MatrixOne Test Runner entry point
+set -e
+HERE=$(cd "$(dirname "$0")" && pwd)
+exec python3 -u -m motrlib.runner "$@"
