@@ -191,6 +191,8 @@ jobs:
           docker kill --signal=INT qa-up-restored-old >/dev/null
           test "$(timeout 150 docker wait qa-up-restored-old)" = 0
           docker rm qa-up-restored-old >/dev/null
+          docker run --rm -v "$RUNNER_TEMP/qa-up/root:/work" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -cfg etc/launch/cn.toml -catalog-upgrade-decisions /work/decisions-valid.ndjson
+          echo 'republished decision after old backup restore'
           echo 'restored 4.2.5 copy verified before a new forward upgrade'
           docker run -d --name qa-up-interrupt --network host -v "$RUNNER_TEMP/qa-up/root:/work" -v "$RUNNER_TEMP/qa-up/empty-cgroup:/sys/fs/cgroup:ro" -w /work -e LD_LIBRARY_PATH=/work/new/lib --entrypoint /work/new/mo-service qa-upgrade-native -launch etc/launch/launch.toml -debug-http=127.0.0.1:16090
           "$RUNNER_TEMP/qa-up/venv/bin/python" "$RUNNER_TEMP/qa-up/check.py"
