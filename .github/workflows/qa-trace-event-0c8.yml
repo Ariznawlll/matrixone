@@ -85,9 +85,11 @@ jobs:
               q.execute("select mo_ctl('cn','txn-trace','enable txn')");print('trace enable',q.fetchall())
               time.sleep(15)
               event_conn=conn('root')
-              for i in range(30):
-                  with event_conn.cursor() as event_query:
-                      event_query.execute('select count(*) from qa_upgrade_data.t');event_query.fetchall()
+              with event_conn.cursor() as event_query:
+                  event_query.execute('create table qa_upgrade_data.trace_work(id int primary key, v int)')
+                  event_query.execute('insert into qa_upgrade_data.trace_work values(1,0)')
+                  for i in range(30):
+                      event_query.execute('update qa_upgrade_data.trace_work set v=v+1 where id=1')
               event_conn.close()
               print('waiting for trace exporter',flush=True)
               time.sleep(45)
