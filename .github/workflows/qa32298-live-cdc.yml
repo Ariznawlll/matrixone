@@ -62,7 +62,14 @@ jobs:
           c=conn('qa_cdc:admin')
           with c.cursor() as q:
               for sql in ["create database qa_cdc_source", "create table qa_cdc_source.t(id int primary key, v varchar(20))", "insert into qa_cdc_source.t values (1,'before')", "create pitr qa_cdc_pitr for database qa_cdc_source range 2 'h'", "create cdc qa_legacy 'mysql://qa_cdc#admin:111@127.0.0.1:6001' 'matrixone' 'mysql://qa_cdc#admin:111@127.0.0.1:6001' 'qa_cdc_source:qa_cdc_target' {'Level'='database'}"]:
-                  print('execute fixture step',sql.split()[0:3],flush=True);q.execute(sql)
+                  print('execute fixture step',sql.split()[0:3],flush=True)
+              for attempt in range(120):
+                  try:q.execute(sql);break
+                  except pymysql.MySQLError as err:
+                      if not sql.startswith('create cdc ') or 'TaskService is not available' not in str(err):raise
+                      if attempt == 119:raise
+                      time.sleep(2)
+
           c.close()
           c=conn('dump')
           with c.cursor() as q:
