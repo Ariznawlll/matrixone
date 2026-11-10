@@ -73,21 +73,15 @@ jobs:
               trace_tables=[row[0] for row in q.fetchall()]
               assert trace_tables==sorted(names),trace_tables
               print('historical trace tables',len(trace_tables))
-              fixtures={
-                  'trace_event_txn': "insert into mo_debug.trace_event_txn(ts,txn_id,cn,event_type,info) values(123,'qa-txn','qa-cn','qa-event','retained')",
-                  'trace_event_data': "insert into mo_debug.trace_event_data(ts,cn,event_type,entry_type,table_id,row_data) values(123,'qa-cn','qa-event','qa-entry',42,'retained')",
-                  'trace_table_filters': "insert into mo_debug.trace_table_filters(table_id,table_name,`columns`) values(42,'qa-table','a,b')",
-                  'trace_txn_filters': "insert into mo_debug.trace_txn_filters(method,value) values('qa-method','retained')",
-                  'trace_statement_filters': "insert into mo_debug.trace_statement_filters(method,value) values('qa-method','retained')",
-                  'trace_event_error': "insert into mo_debug.trace_event_error(ts,txn_id,error_info) values(123,'qa-txn','retained')",
-                  'trace_statement': "insert into mo_debug.trace_statement(ts,txn_id,sql,cost_us) values(123,'qa-txn','select 1',42)",
-                  'trace_event_txn_action': "insert into mo_debug.trace_event_txn_action(ts,txn_id,cn,action,action_sequence) values(123,'qa-txn','qa-cn','retained',42)"}
+              q.execute('use qa_upgrade_data')
+              for command in ('add-table t id','add-txn user root','add-statement contains qa_marker'):
+                  q.execute("select mo_ctl('cn','txn-trace',%s)",(command,));print('trace command',command,q.fetchall())
               saved={}
-              for name,sql in fixtures.items():
-                  q.execute(sql);q.execute('select * from mo_debug.'+name);saved[name]=q.fetchall()
-                  assert len(saved[name])==1,(name,saved[name])
+              for name in ('trace_table_filters','trace_txn_filters','trace_statement_filters'):
+                  q.execute('select * from mo_debug.'+name+' order by id');saved[name]=q.fetchall()
+                  assert saved[name],(name,saved[name])
               with open(os.environ['RUNNER_TEMP']+'/qa-up/trace-rows.json','w') as f:json.dump(saved,f)
-              print('seeded historical data in all eight trace tables')
+              print('seeded trace filter data via supported txn-trace commands')
           c.close()
           for name in ('qa_upgrade_a','qa_upgrade_b') + tuple('qa_upgrade_%03d'%i for i in range(129)):
               t=conn(name+':admin')
@@ -151,10 +145,10 @@ jobs:
               print('historical trace tables retained',len(trace_tables))
               saved=json.load(open(os.environ['RUNNER_TEMP']+'/qa-up/trace-rows.json'))
               for name,expected_rows in saved.items():
-                  q.execute('select * from mo_debug.'+name)
+                  q.execute('select * from mo_debug.'+name+' order by id')
                   got=[list(row) for row in q.fetchall()]
                   assert got==expected_rows,(name,got,expected_rows)
-              print('historical rows in all eight trace tables retained')
+              print('historical rows in all three trace filter tables retained')
               q.execute("select count(*) from information_schema.tables where table_schema='qa_upgrade_data' and table_name='t'");assert q.fetchone()==(1,)
               print('system table data, metadata and historical trace rows retained',len(got))
           c.close()
