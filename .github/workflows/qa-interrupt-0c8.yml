@@ -131,13 +131,13 @@ jobs:
                       while b'\n' in buffer:
                           line,buffer=buffer.split(b'\n',1)
                           low=line.lower()
-                          if b'mo_upgrade_tenant' in low and b'update' in low:
-                              print('observed tenant-upgrade mutation:',line.decode(errors='replace')[:1000],flush=True)
+                          if b'update mo_account set create_version' in low:
+                              print('observed tenant create_version update:',line.decode(errors='replace')[:1000],flush=True)
                               subprocess.run(['docker','kill','--signal=KILL','qa-up-main'],check=True)
                               hit=True;break
                       if hit:break
                   if hit:break
-              if not hit:raise RuntimeError('fault not injected: tenant mutation marker not observed')
+              if not hit:raise RuntimeError('fault not injected: tenant create_version update not observed')
           finally:
               p.terminate();p.wait(timeout=10)
           PYFAULT
