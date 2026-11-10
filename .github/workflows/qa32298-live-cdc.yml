@@ -14,7 +14,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: matrixorigin/matrixone
-          ref: 0c8bd5e5f3be4ce5582201513161181ddca37d6d
+          ref: 00da05219fb8dce0266de4efa7c4bbfac06491de
           fetch-depth: 1
       - name: Build exact main and native dependencies
         run: |
